@@ -1,0 +1,299 @@
+{% extends "base_sidebar.html" %}
+
+{% block title %}Backup Groups - AWS Dashboard{% endblock %}
+
+{% block content %}
+<!-- Page Header -->
+<div class="mb-6">
+    <h1 class="text-3xl font-bold text-white mb-2">Backup Groups</h1>
+    <p class="text-slate-400">Create and manage hybrid backup groups for your EC2 instances</p>
+</div>
+
+<!-- Create New Group Button -->
+<div class="mb-6">
+    <button class="btn btn-primary gap-2" onclick="create_group_modal.showModal()">
+        <i class="fas fa-plus"></i>
+        Create New Backup Group
+    </button>
+</div>
+
+<!-- Backup Groups Grid -->
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+    {% if backup_groups %}
+        {% for group in backup_groups %}
+        <div class="card bg-base-100 shadow-xl border border-base-300 hover:border-primary transition-all">
+            <div class="card-body">
+                <h2 class="card-title text-primary">
+                    <i class="fas fa-server"></i>
+                    {{ group.name }}
+                </h2>
+                <div class="divider my-2"></div>
+                
+                <div class="space-y-2 text-sm">
+                    <div class="flex justify-between">
+                        <span class="text-slate-400">Instances:</span>
+                        <span class="font-semibold">{{ group.instances.count() }}</span>
+                    </div>
+                    {% if group.policy %}
+                    <div class="flex justify-between">
+                        <span class="text-slate-400">Backup Strategy:</span>
+                        <span class="badge badge-sm badge-info">{{ group.policy.backup_strategy|default('hybrid')|capitalize|replace('_', ' ') }}</span>
+                    </div>
+                    {% if group.policy.backup_strategy != 'snapshot_only' %}
+                    <div class="flex justify-between">
+                        <span class="text-slate-400">AMI Backups:</span>
+                        <span>Every {{ group.policy.ami_interval_value|default(1) }} {{ group.policy.ami_interval_unit|default('days') }}</span>
+                    </div>
+                    {% endif %}
+                    {% if group.policy.backup_strategy != 'ami_only' %}
+                    <div class="flex justify-between">
+                        <span class="text-slate-400">Snapshots:</span>
+                        <span>Every {{ group.policy.snapshot_interval_value|default(15) }} {{ group.policy.snapshot_interval_unit|default('minutes') }}</span>
+                    </div>
+                    {% endif %}
+                    <div class="flex justify-between">
+                        <span class="text-slate-400">Retention:</span>
+                        {% if group.policy.retention_days %}
+                        <span>{{ group.policy.retention_days }} days</span>
+                        {% elif group.policy.retention_count %}
+                        <span>{{ group.policy.retention_count }} backups</span>
+                        {% else %}
+                        <span>Default</span>
+                        {% endif %}
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-slate-400">Last Backup:</span>
+                        {% if group.policy.last_run_time %}
+                        <span class="text-success">✓ {{ group.policy.last_run_time|timeago }}</span>
+                        {% else %}
+                        <span class="text-warning">No backups yet</span>
+                        {% endif %}
+                    </div>
+                    {% else %}
+                    <div class="flex justify-between">
+                        <span class="text-slate-400">Status:</span>
+                        <span class="text-error">No policy configured</span>
+                    </div>
+                    {% endif %}
+                </div>
+                
+                <div class="divider my-2"></div>
+                
+                <div class="card-actions justify-end">
+                    <button class="btn btn-sm btn-ghost gap-1" onclick="editGroup('{{ group.id }}')">
+                        <i class="fas fa-edit"></i>
+                        Edit
+                    </button>
+                    <button class="btn btn-sm btn-error btn-outline gap-1" onclick="deleteGroup('{{ group.id }}')">
+                        <i class="fas fa-trash"></i>
+                        Delete
+                    </button>
+                    <button class="btn btn-sm btn-primary gap-1" onclick="backupNow('{{ group.id }}')">
+                        <i class="fas fa-bolt"></i>
+                        Backup Now
+                    </button>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    {% else %}
+    <!-- Empty State -->
+    <div class="col-span-3 text-center py-16">
+        <i class="fas fa-database text-6xl text-slate-600 mb-4"></i>
+        <h3 class="text-2xl font-bold mb-2">No Backup Groups Yet</h3>
+        <p class="text-slate-400 mb-6">Create your first backup group to start automated backups</p>
+        <button class="btn btn-primary gap-2" onclick="create_group_modal.showModal()">
+            <i class="fas fa-plus"></i>
+            Create Your First Group
+        </button>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Create Group Modal -->
+<dialog id="create_group_modal" class="modal">
+    <div class="modal-box w-11/12 max-w-3xl">
+        <h3 class="font-bold text-lg mb-4">Create Backup Group</h3>
+        <form id="createGroupForm" action="{{ url_for('dashboard.create_backup_group') }}" method="POST">
+            <div class="form-control mb-4">
+                <label class="label"><span class="label-text">Group Name</span></label>
+                <input type="text" name="name" placeholder="e.g., Production Servers" class="input input-bordered" required>
+            </div>
+            
+            <div class="form-control mb-4">
+                <label class="label"><span class="label-text">Description</span></label>
+                <textarea name="description" class="textarea textarea-bordered" placeholder="Optional description"></textarea>
+            </div>
+            
+            <div class="form-control mb-4">
+                <label class="label"><span class="label-text">Select EC2 Instances</span></label>
+                <select name="instance_ids" multiple class="select select-bordered h-40" size="8" required>
+                    {% for instance in instances %}
+                    <option value="{{ instance.id }}">{{ instance.instance_id }} - {{ instance.name or 'Unnamed' }} ({{ instance.region }})</option>
+                    {% endfor %}
+                </select>
+                <label class="label"><span class="label-text-alt">Hold Ctrl/Cmd to select multiple</span></label>
+            </div>
+            
+            <div class="form-control mb-4">
+                <label class="label"><span class="label-text">Backup Strategy</span></label>
+                <select name="backup_strategy" class="select select-bordered" onchange="toggleBackupStrategy(this.value)">
+                    <option value="hybrid">Hybrid (AMI + Snapshots)</option>
+                    <option value="ami_only">AMI Only</option>
+                    <option value="snapshot_only">Snapshot Only</option>
+                </select>
+                <label class="label"><span class="label-text-alt">Hybrid strategy creates full AMI backups on a schedule with incremental snapshots in between</span></label>
+            </div>
+            
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                <div id="ami_settings">
+                    <h4 class="font-semibold mb-2">AMI Backup Settings</h4>
+                    <div class="form-control mb-2">
+                        <label class="label"><span class="label-text">AMI Backup Interval</span></label>
+                        <div class="flex gap-2">
+                            <input type="number" name="ami_interval_value" min="1" value="1" class="input input-bordered w-24">
+                            <select name="ami_interval_unit" class="select select-bordered flex-1">
+                                <option value="minutes">Minutes</option>
+                                <option value="hourly">Hourly</option>
+                                <option value="days" selected>Daily</option>
+                                <option value="weekly">Weekly</option>
+                                <option value="monthly">Monthly</option>
+                                <option value="yearly">Yearly</option>
+                            </select>
+                            <!-- <select name="ami_interval_unit" class="select select-bordered flex-1">
+                                <option value="hours">Hours</option>
+                                <option value="days" selected>Days</option>
+                                <option value="weeks">Weeks</option>
+                            </select> -->
+                        </div>
+                    </div>
+                </div>
+                
+                <div id="snapshot_settings">
+                    <h4 class="font-semibold mb-2">Snapshot Backup Settings</h4>
+                    <div class="form-control mb-2">
+                        <label class="label"><span class="label-text">Snapshot Interval</span></label>
+                        <div class="flex gap-2">
+                            <input type="number" name="snapshot_interval_value" min="1" value="15" class="input input-bordered w-24">
+                            <select name="snapshot_interval_unit" class="select select-bordered flex-1">
+                                <option value="minutes" selected>Minutes</option>
+                                <option value="hours">Hours</option>
+                                <option value="days">Days</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="form-control mb-4">
+                <label class="label"><span class="label-text">Retention Policy</span></label>
+                <div class="flex gap-2">
+                    <select name="retention_type" class="select select-bordered" onchange="toggleRetentionType(this.value)">
+                        <option value="days">Keep for days</option>
+                        <option value="count">Keep number of backups</option>
+                    </select>
+                    <input type="number" name="retention_days" id="retention_days" min="1" value="7" class="input input-bordered w-24">
+                    <input type="number" name="retention_count" id="retention_count" min="1" value="10" class="input input-bordered w-24" style="display:none;">
+                </div>
+            </div>
+            
+            <div class="form-control mb-4">
+                <label class="cursor-pointer label">
+                    <span class="label-text">Enable Schedule</span>
+                    <input type="checkbox" name="is_active" checked class="toggle toggle-primary" />
+                </label>
+            </div>
+            
+            <div class="modal-action">
+                <button type="button" class="btn" onclick="create_group_modal.close()">Cancel</button>
+                <button type="submit" class="btn btn-primary">Create Group</button>
+            </div>
+        </form>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+
+<!-- Run Backup Modal -->
+<dialog id="backup_options_modal" class="modal">
+    <div class="modal-box">
+        <h3 class="font-bold text-lg mb-4">Run Backup Now</h3>
+        <form action="{{ url_for('dashboard.run_backup_now_from_groups') }}" method="POST">
+            <input type="hidden" id="backup_group_id" name="group_id" value="">            
+            <div class="form-control mb-4">
+                <label class="label"><span class="label-text">Backup Type</span></label>
+                <select name="backup_type" class="select select-bordered">
+                    <option value="ami">Full AMI Backup</option>
+                    <option value="snapshot">Snapshot Backup</option>
+                </select>
+                <label class="label"><span class="label-text-alt">AMI creates a full system image, snapshot is faster but only backs up volumes</span></label>
+            </div>
+            
+            <div class="modal-action">
+                <button type="button" class="btn" onclick="backup_options_modal.close()">Cancel</button>
+                <button type="submit" class="btn btn-primary">Run Backup</button>
+            </div>
+        </form>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function toggleBackupStrategy(strategy) {
+    const amiSettings = document.getElementById('ami_settings');
+    const snapshotSettings = document.getElementById('snapshot_settings');
+    
+    if (strategy === 'ami_only') {
+        amiSettings.style.display = 'block';
+        snapshotSettings.style.display = 'none';
+    } else if (strategy === 'snapshot_only') {
+        amiSettings.style.display = 'none';
+        snapshotSettings.style.display = 'block';
+    } else { // hybrid
+        amiSettings.style.display = 'block';
+        snapshotSettings.style.display = 'block';
+    }
+}
+
+function toggleRetentionType(type) {
+    const daysInput = document.getElementById('retention_days');
+    const countInput = document.getElementById('retention_count');
+    
+    if (type === 'days') {
+        daysInput.style.display = 'block';
+        countInput.style.display = 'none';
+    } else { // count
+        daysInput.style.display = 'none';
+        countInput.style.display = 'block';
+    }
+}
+
+function editGroup(groupId) {
+    // Redirect to edit page or show modal
+    window.location.href = "{{ url_for('dashboard.edit_backup_group', group_id=0) }}".replace('0', groupId);
+}
+
+function deleteGroup(groupId) {
+    if (confirm('Are you sure you want to delete this backup group? All backup history will be preserved.')) {
+        window.location.href = "{{ url_for('dashboard.delete_backup_group', group_id=0) }}".replace('0', groupId);
+    }
+}
+
+function backupNow(groupId) {
+    // Show backup options modal
+    document.getElementById('backup_group_id').value = groupId;
+    backup_options_modal.showModal();
+}
+
+// Initialize display on page load
+document.addEventListener('DOMContentLoaded', function() {
+    const strategy = document.querySelector('select[name="backup_strategy"]').value;
+    toggleBackupStrategy(strategy);
+    
+    const retentionType = document.querySelector('select[name="retention_type"]').value;
+    toggleRetentionType(retentionType);
+});
+</script>
+{% endblock %}

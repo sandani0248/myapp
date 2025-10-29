@@ -1,0 +1,1730 @@
+styles.css
+
+---------------------------------------------
+
+/* Custom Stylesheet for AWS Inventory Dashboard */
+
+/* Make DataTables controls blend with DaisyUI */
+.dataTables_wrapper .dataTables_length select,
+.dataTables_wrapper .dataTables_filter input {
+    @apply input input-bordered input-sm bg-base-100; /* Use theme background */
+    margin: 0 0.25rem;
+}
+
+/* Align top controls */
+.dataTables_wrapper .dataTables_length,
+.dataTables_wrapper .dataTables_filter {
+    @apply mb-4 text-sm; /* Smaller text */
+}
+.dataTables_wrapper .dataTables_filter {
+     @apply float-right; /* Align search to the right */
+}
+.dataTables_wrapper .dataTables_length {
+     @apply float-left; /* Align length to the left */
+}
+
+/* Style DataTables pagination like DaisyUI join component */
+.dataTables_wrapper .dataTables_paginate {
+    @apply join pt-4; /* Add padding top */
+    clear: both; /* Ensure it stays below floated elements */
+    text-align: center; /* Center pagination */
+}
+.dataTables_wrapper .dataTables_paginate .paginate_button {
+    @apply btn btn-sm join-item; /* Use join-item class */
+}
+.dataTables_wrapper .dataTables_paginate .paginate_button.current,
+.dataTables_wrapper .dataTables_paginate .paginate_button.current:hover {
+    @apply btn-active pointer-events-none; /* Disable clicks on current */
+}
+.dataTables_wrapper .dataTables_paginate .paginate_button.disabled,
+.dataTables_wrapper .dataTables_paginate .paginate_button.disabled:hover {
+    @apply btn-disabled;
+}
+.dataTables_wrapper .dataTables_paginate .paginate_button:not(.disabled):hover {
+     @apply bg-base-300; /* Add slight hover background */
+}
+
+
+/* Table Specific Styles */
+td.details-control {
+    text-align: center;
+    cursor: pointer;
+    width: 25px; /* Fixed width for the expand icon */
+}
+tr.shown td.details-control {
+     /* Optional: Visual indication that row is open, like a subtle background */
+    /* @apply bg-base-200; */
+}
+/* Style for child row content */
+tr.shown + tr > td { /* Target the direct next row's TD when parent is shown */
+     padding: 0 !important; /* Remove padding for the container */
+     border: none !important; /* Remove borders if needed */
+}
+tr.shown + tr > td > div { /* The div inside the child row TD */
+    @apply rounded-md;
+}
+
+/* Ensure tables use DaisyUI styling and handle overflow */
+/* Use table-sm for denser rows */
+.dataTables_wrapper table.dataTable {
+    @apply table table-zebra table-sm w-full;
+    border-collapse: collapse !important; /* Override DataTables default if needed */
+    clear: both;
+}
+
+/* Add vertical borders for better column separation */
+table.dataTable th,
+table.dataTable td {
+    @apply border-b border-base-300 px-3 py-2; /* Add padding */
+}
+/* Ensure header is aligned */
+table.dataTable thead th {
+    @apply text-left;
+}
+
+
+/* Override default link color within tables */
+table.dataTable a.link {
+    @apply link-primary link-hover; /* Use DaisyUI link classes */
+}
+
+/* Processing indicator alignment and styling */
+.dataTables_wrapper .dataTables_processing {
+    /* Centered overlay style */
+    @apply absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-base-100 bg-opacity-75 p-4 rounded-lg shadow-lg z-10;
+    /* Ensure it's hidden by default, shown by DataTables JS */
+    display: none;
+}
+/* Style the loading spinner inside */
+.dataTables_wrapper .dataTables_processing > span {
+     @apply text-primary; /* Apply primary color to the spinner */
+}
+
+/* Ensure hidden tabs don't take up space */
+.tab-content.hidden {
+    display: none;
+}
+
+
+-------------------------------------------------------
+
+
+----- routes.py - 23-10-2025 ---------
+
+# File: app/dashboard/routes.py (Corrected)
+from flask import render_template, jsonify, request, flash, redirect, url_for, Blueprint
+from flask_login import login_required, current_user
+from app import db
+from app.models import (
+    EC2Instance, AWSCredentials, VPC, Subnet, SecurityGroup, AMI, Snapshot
+    # Add RouteTable, Route, ENI, ElasticIP if using full models
+)
+from app.tasks import sync_inventory_task
+from sqlalchemy import func, or_
+# Import SecurityService if add_account function needs it
+from app.services.security_service import SecurityService
+
+bp = Blueprint('dashboard', __name__)
+
+# --- Core Routes ---
+
+@bp.route('/')
+@bp.route('/index')
+@login_required
+def index():
+    """Renders the main dashboard page."""
+    aws_accounts = AWSCredentials.query.filter_by(user_id=current_user.id).order_by(AWSCredentials.account_name).all()
+    stats = {
+        'instance_count': db.session.query(func.count(EC2Instance.id)).join(AWSCredentials).filter(AWSCredentials.user_id == current_user.id).scalar() or 0,
+        'vpc_count': db.session.query(func.count(VPC.id)).join(AWSCredentials).filter(AWSCredentials.user_id == current_user.id).scalar() or 0,
+        'subnet_count': db.session.query(func.count(Subnet.id)).join(AWSCredentials).filter(AWSCredentials.user_id == current_user.id).scalar() or 0,
+        'sg_count': db.session.query(func.count(SecurityGroup.id)).join(AWSCredentials).filter(AWSCredentials.user_id == current_user.id).scalar() or 0,
+        'ami_count': db.session.query(func.count(AMI.id)).join(AWSCredentials).filter(AWSCredentials.user_id == current_user.id).scalar() or 0,
+        'snapshot_count': db.session.query(func.count(Snapshot.id)).join(AWSCredentials).filter(AWSCredentials.user_id == current_user.id).scalar() or 0
+    }
+    return render_template('dashboard/index.html', title='Dashboard', aws_accounts=aws_accounts, stats=stats)
+
+@bp.route('/sync-inventory', methods=['POST'])
+@login_required
+def sync_inventory():
+    """Triggers a background inventory sync."""
+    account_id = request.form.get('account_id')
+    if not account_id: return jsonify({'status': 'error', 'message': 'Account ID is required.'}), 400
+    aws_creds = db.session.get(AWSCredentials, account_id)
+    if not aws_creds or aws_creds.user_id != current_user.id: return jsonify({'status': 'error', 'message': 'Account not found or access denied.'}), 404
+    if aws_creds.last_sync_status and "Syncing" in aws_creds.last_sync_status: return jsonify({'status': 'warning', 'message': f'Sync already in progress for {aws_creds.account_name}.'}), 202
+    sync_inventory_task.delay(account_id)
+    return jsonify({'status': 'success', 'message': f'Started background sync for {aws_creds.account_name}.'}), 202
+
+@bp.route('/add-account', methods=['POST'])
+@login_required
+def add_account():
+    """Adds a new AWS account to the system."""
+    security_service = SecurityService()
+    account_name = request.form.get('account_name')
+    auth_type = request.form.get('auth_type')
+    default_region = request.form.get('default_region') or None
+    if not account_name or not auth_type: flash('Account Name and Auth Type required.', 'danger'); return redirect(url_for('dashboard.index'))
+    if AWSCredentials.query.filter_by(account_name=account_name, user_id=current_user.id).first(): flash('Account name already exists.', 'warning'); return redirect(url_for('dashboard.index'))
+    common_data = {'account_name': account_name, 'auth_type': auth_type, 'default_region': default_region, 'user_id': current_user.id}
+    if auth_type == 'access_key':
+        access_key = request.form.get('aws_access_key_id'); secret_key = request.form.get('aws_secret_access_key')
+        if not all([access_key, secret_key]): flash('Access Key ID/Secret required.', 'danger'); return redirect(url_for('dashboard.index'))
+        try: encrypted_secret = security_service.encrypt_data(secret_key)
+        except Exception as e: flash(f'Encrypt failed: {e}', 'danger'); return redirect(url_for('dashboard.index'))
+        new_creds = AWSCredentials(**common_data, aws_access_key_id=access_key, encrypted_aws_secret_access_key=encrypted_secret)
+    elif auth_type == 'iam_role':
+        role_arn = request.form.get('role_arn')
+        if not role_arn: flash('Role ARN required.', 'danger'); return redirect(url_for('dashboard.index'))
+        new_creds = AWSCredentials(**common_data, role_arn=role_arn)
+    else: flash('Invalid auth type.', 'danger'); return redirect(url_for('dashboard.index'))
+    try: db.session.add(new_creds); db.session.commit(); flash(f'Account "{account_name}" added.', 'success')
+    except Exception as e: db.session.rollback(); flash(f'Failed to add account: {e}', 'danger')
+    return redirect(url_for('dashboard.index'))
+
+# --- API Endpoints for UI/UX ---
+
+@bp.route('/api/account-sync-status', methods=['GET'])
+@login_required
+def get_account_sync_status():
+    """Pollable endpoint to check the sync status of all accounts."""
+    accounts = AWSCredentials.query.filter_by(user_id=current_user.id).all()
+    status_map = { acc.id: {'status': acc.last_sync_status or 'Unknown', 'last_sync_time': acc.last_sync_time.strftime("%Y-%m-%d %H:%M:%S UTC") if acc.last_sync_time else 'Never'} for acc in accounts }
+    return jsonify(status_map)
+
+# --- DataTables Helper ---
+def process_datatable_request(query, columns_map, search_columns):
+    """Handles server-side processing args for DataTables."""
+    draw = request.args.get('draw', type=int, default=1)
+    start = request.args.get('start', type=int, default=0)
+    length = request.args.get('length', type=int, default=10)
+    search_value = request.args.get('search[value]')
+
+    # Get total count before filtering
+    total_records_query = db.session.query(func.count()).select_from(query.subquery())
+    total_records = total_records_query.scalar() or 0
+
+    # Apply global search filter
+    if search_value:
+        search_filters = [col.ilike(f"%{search_value}%") for col in search_columns if hasattr(col, 'ilike')]
+        if search_filters:
+            query = query.filter(or_(*search_filters))
+
+    # Get count after filtering
+    total_filtered_query = db.session.query(func.count()).select_from(query.subquery())
+    total_filtered = total_filtered_query.scalar() or 0
+
+    # Apply sorting
+    order = []
+    i = 0
+    while True:
+        col_index_str = request.args.get(f'order[{i}][column]')
+        if col_index_str is None: break
+        try:
+             col_index = int(col_index_str)
+             col_data_key = f'columns[{col_index}][data]'
+             col_name_key = request.args.get(col_data_key)
+             if col_name_key:
+                  sort_column = columns_map.get(col_name_key)
+                  if sort_column is not None:
+                      descending = request.args.get(f'order[{i}][dir]') == 'desc'
+                      order.append(sort_column.desc() if descending else sort_column.asc())
+        except (ValueError, IndexError):
+             pass # Ignore invalid order parameters
+        i += 1
+
+    if order:
+        query = query.order_by(*order)
+    # --- REMOVED FAULTY DEFAULT SORT BLOCK ---
+
+    # Apply pagination
+    if length != -1:
+        query = query.offset(start).limit(length)
+
+    return query, total_records, total_filtered, draw
+
+
+# --- DataTables API Endpoints ---
+@bp.route('/api/instances', methods=['GET'])
+@login_required
+def get_instances():
+    query = db.session.query(EC2Instance, AWSCredentials.account_name.label('account_name_label'), VPC.name.label('vpc_name_label')).select_from(EC2Instance).join(AWSCredentials, EC2Instance.aws_account_id == AWSCredentials.id).outerjoin(VPC, EC2Instance.vpc_id_str == VPC.vpc_id).filter(AWSCredentials.user_id == current_user.id)
+    columns_map = {'name': EC2Instance.name, 'instance_id': EC2Instance.instance_id, 'state': EC2Instance.state, 'instance_type': EC2Instance.instance_type, 'region': EC2Instance.region}
+    search_cols = [EC2Instance.instance_id, EC2Instance.name, EC2Instance.public_ip, EC2Instance.private_ip, VPC.name, AWSCredentials.account_name]
+    query, total_records, total_filtered, draw = process_datatable_request(query, columns_map, search_cols)
+    data = []
+    for inst, acc_name, vpc_name in query.all(): data.append({'instance_id': inst.instance_id, 'name': inst.name or 'N/A', 'state': inst.state or 'N/A', 'instance_type': inst.instance_type or 'N/A', 'region': inst.region or 'N/A', 'public_ip': inst.public_ip or 'N/A', 'private_ip': inst.private_ip or 'N/A', 'vpc_name': vpc_name or 'N/A', 'ami_id': inst.ami_id_str or 'N/A', 'subnet_id': inst.subnet_id_str or 'N/A', 'account_name': acc_name or 'N/A', 'console_url': f"https://{inst.region}.console.aws.amazon.com/ec2/v2/home?region={inst.region}#InstanceDetails:instanceId={inst.instance_id}" if inst.region and inst.instance_id else None})
+    return jsonify({'draw': draw, 'recordsTotal': total_records, 'recordsFiltered': total_filtered, 'data': data})
+
+# --- Add the rest of the API endpoints here (get_vpcs, get_subnets, etc.) ---
+# (Make sure these also call the corrected process_datatable_request)
+
+@bp.route('/api/vpcs', methods=['GET'])
+@login_required
+def get_vpcs():
+    query = db.session.query(VPC, AWSCredentials.account_name.label('account_name_label')).select_from(VPC).join(AWSCredentials).filter(AWSCredentials.user_id == current_user.id)
+    columns_map = {'name': VPC.name, 'vpc_id': VPC.vpc_id, 'account_name': AWSCredentials.account_name, 'cidr_block': VPC.cidr_block, 'region': VPC.region}
+    search_cols = [VPC.name, VPC.vpc_id, VPC.cidr_block, AWSCredentials.account_name]
+    query, total_records, total_filtered, draw = process_datatable_request(query, columns_map, search_cols)
+    data = [{'name': vpc.name or 'N/A', 'vpc_id': vpc.vpc_id, 'account_name': acc_name or 'N/A', 'region': vpc.region or 'N/A', 'cidr_block': vpc.cidr_block or 'N/A', 'is_default': 'Yes' if vpc.is_default else 'No', 'console_url': f"https://{vpc.region}.console.aws.amazon.com/vpc/home?region={vpc.region}#VpcDetails:VpcId={vpc.vpc_id}" if vpc.region and vpc.vpc_id else None} for vpc, acc_name in query.all()]
+    return jsonify({ 'draw': draw, 'recordsTotal': total_records, 'recordsFiltered': total_filtered, 'data': data })
+
+@bp.route('/api/subnets', methods=['GET'])
+@login_required
+def get_subnets():
+    query = db.session.query(Subnet, AWSCredentials.account_name.label('account_name_label'), VPC.name.label('vpc_name_label')).select_from(Subnet).join(AWSCredentials).outerjoin(VPC, Subnet.vpc_id_str == VPC.vpc_id).filter(AWSCredentials.user_id == current_user.id)
+    columns_map = {'name': Subnet.name, 'subnet_id': Subnet.subnet_id, 'vpc_name': VPC.name, 'cidr_block': Subnet.cidr_block, 'region': Subnet.region, 'availability_zone': Subnet.availability_zone}
+    search_cols = [Subnet.name, Subnet.subnet_id, VPC.name, Subnet.cidr_block, Subnet.availability_zone, AWSCredentials.account_name]
+    query, total_records, total_filtered, draw = process_datatable_request(query, columns_map, search_cols)
+    data = [{'name': subnet.name or 'N/A', 'subnet_id': subnet.subnet_id, 'account_name': acc_name or 'N/A', 'vpc_name': vpc_name or 'N/A', 'region': subnet.region or 'N/A', 'availability_zone': subnet.availability_zone or 'N/A', 'cidr_block': subnet.cidr_block or 'N/A', 'console_url': f"https://{subnet.region}.console.aws.amazon.com/vpc/home?region={subnet.region}#SubnetDetails:subnetId={subnet.subnet_id}" if subnet.region and subnet.subnet_id else None} for subnet, acc_name, vpc_name in query.all()]
+    return jsonify({ 'draw': draw, 'recordsTotal': total_records, 'recordsFiltered': total_filtered, 'data': data })
+
+@bp.route('/api/security-groups', methods=['GET'])
+@login_required
+def get_security_groups():
+    query = db.session.query(SecurityGroup, AWSCredentials.account_name.label('account_name_label'), VPC.name.label('vpc_name_label')).select_from(SecurityGroup).join(AWSCredentials).outerjoin(VPC, SecurityGroup.vpc_id_str == VPC.vpc_id).filter(AWSCredentials.user_id == current_user.id)
+    columns_map = {'group_name': SecurityGroup.group_name, 'group_id': SecurityGroup.group_id, 'vpc_name': VPC.name, 'region': SecurityGroup.region}
+    search_cols = [SecurityGroup.group_name, SecurityGroup.group_id, VPC.name, SecurityGroup.description, AWSCredentials.account_name]
+    query, total_records, total_filtered, draw = process_datatable_request(query, columns_map, search_cols)
+    data = [{'group_name': sg.group_name or 'N/A', 'group_id': sg.group_id, 'account_name': acc_name or 'N/A', 'vpc_name': vpc_name or 'N/A', 'region': sg.region or 'N/A', 'description': sg.description or '', 'console_url': f"https://{sg.region}.console.aws.amazon.com/ec2/v2/home?region={sg.region}#SecurityGroup:groupId={sg.group_id}" if sg.region and sg.group_id else None} for sg, acc_name, vpc_name in query.all()]
+    return jsonify({ 'draw': draw, 'recordsTotal': total_records, 'recordsFiltered': total_filtered, 'data': data })
+
+@bp.route('/api/amis', methods=['GET'])
+@login_required
+def get_amis():
+    query = db.session.query(AMI, AWSCredentials.account_name.label('account_name_label')).select_from(AMI).join(AWSCredentials).filter(AWSCredentials.user_id == current_user.id)
+    columns_map = {'name': AMI.name, 'image_id': AMI.image_id, 'owner_id': AMI.owner_id, 'region': AMI.region, 'creation_date': AMI.creation_date}
+    search_cols = [AMI.name, AMI.image_id, AMI.owner_id, AWSCredentials.account_name]
+    query, total_records, total_filtered, draw = process_datatable_request(query, columns_map, search_cols)
+    data = [{'name': ami.name or 'N/A', 'image_id': ami.image_id, 'account_name': acc_name or 'N/A', 'region': ami.region or 'N/A', 'owner_id': ami.owner_id or 'N/A', 'creation_date': ami.creation_date.strftime("%Y-%m-%d") if ami.creation_date else 'N/A', 'console_url': f"https://{ami.region}.console.aws.amazon.com/ec2/v2/home?region={ami.region}#ImageDetails:imageId={ami.image_id}" if ami.region and ami.image_id else None} for ami, acc_name in query.all()]
+    return jsonify({ 'draw': draw, 'recordsTotal': total_records, 'recordsFiltered': total_filtered, 'data': data })
+
+@bp.route('/api/snapshots', methods=['GET'])
+@login_required
+def get_snapshots():
+    query = db.session.query(Snapshot, AWSCredentials.account_name.label('account_name_label')).select_from(Snapshot).join(AWSCredentials).filter(AWSCredentials.user_id == current_user.id)
+    columns_map = {'snapshot_id': Snapshot.snapshot_id, 'volume_id': Snapshot.volume_id, 'state': Snapshot.state, 'region': Snapshot.region, 'start_time': Snapshot.start_time}
+    search_cols = [Snapshot.snapshot_id, Snapshot.volume_id, AWSCredentials.account_name]
+    query, total_records, total_filtered, draw = process_datatable_request(query, columns_map, search_cols)
+    data = [{'snapshot_id': snap.snapshot_id, 'account_name': acc_name or 'N/A', 'region': snap.region or 'N/A', 'volume_id': snap.volume_id or 'N/A', 'volume_size_gb': snap.volume_size_gb, 'state': snap.state or 'N/A', 'start_time': snap.start_time.strftime("%Y-%m-%d %H:%M") if snap.start_time else 'N/A', 'console_url': f"https://{snap.region}.console.aws.amazon.com/ec2/v2/home?region={snap.region}#SnapshotDetails:snapshotId={snap.snapshot_id}" if snap.region and snap.snapshot_id else None} for snap, acc_name in query.all()]
+    return jsonify({ 'draw': draw, 'recordsTotal': total_records, 'recordsFiltered': total_filtered, 'data': data })
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+from flask import render_template, jsonify, request, flash, redirect, url_for, Blueprint, current_app
+from flask_login import login_required, current_user
+from app import db
+from app.models import (
+    EC2Instance, AWSCredentials, VPC, Subnet, SecurityGroup, RouteTable, AMI, Snapshot
+)
+from app.services.aws_service import AWSService
+from app.services.security_service import SecurityService
+import datetime
+from app.tasks import sync_inventory_task
+
+bp = Blueprint('dashboard', __name__)
+
+@bp.route('/')
+@bp.route('/index')
+@login_required
+def index():
+    """Renders the main dashboard page."""
+    aws_accounts = AWSCredentials.query.filter_by(user_id=current_user.id).all()
+    
+    # Get summary stats
+    stats = {
+        'instance_count': EC2Instance.query.join(AWSCredentials).filter(AWSCredentials.user_id == current_user.id).count(),
+        'vpc_count': VPC.query.join(AWSCredentials).filter(AWSCredentials.user_id == current_user.id).count(),
+        'subnet_count': Subnet.query.join(AWSCredentials).filter(AWSCredentials.user_id == current_user.id).count(),
+        'sg_count': SecurityGroup.query.join(AWSCredentials).filter(AWSCredentials.user_id == current_user.id).count(),
+        'ami_count': AMI.query.join(AWSCredentials).filter(AWSCredentials.user_id == current_user.id).count(),
+        'snapshot_count': Snapshot.query.join(AWSCredentials).filter(AWSCredentials.user_id == current_user.id).count()
+    }
+    
+    return render_template('dashboard/index.html', title='Dashboard', aws_accounts=aws_accounts, stats=stats)
+
+@bp.route('/sync-inventory', methods=['POST'])
+@login_required
+def sync_inventory():
+    """
+    Triggers a background inventory sync for an AWS account.
+    """
+    account_id = request.form.get('account_id')
+    if not account_id:
+        flash("Account ID is required for sync.", 'danger')
+        return redirect(url_for('dashboard.index'))
+
+    aws_creds = AWSCredentials.query.filter_by(id=account_id, user_id=current_user.id).first_or_404()
+
+    # This is the magic part: .delay() sends the job to Celery
+    sync_inventory_task.delay(account_id)
+
+    flash(f"Started background inventory sync for {aws_creds.account_name}. The dashboard will update upon completion.", 'info')
+    return redirect(url_for('dashboard.index'))
+        
+    aws_creds = AWSCredentials.query.filter_by(id=account_id, user_id=current_user.id).first_or_404()
+    
+    current_app.logger.info(f"Starting manual sync for account: {aws_creds.account_name}")
+    aws_creds.last_sync_status = "Syncing..."
+    db.session.commit()
+    
+    try:
+        aws_service = AWSService(aws_creds)
+        status = aws_service.sync_all_resources()
+        
+        aws_creds.last_sync_time = datetime.datetime.utcnow()
+        aws_creds.last_sync_status = status
+        db.session.commit()
+        flash(f"Successfully synced inventory for {aws_creds.account_name}.", 'success')
+        
+    except Exception as e:
+        db.session.rollback()
+        error_msg = f"Sync Failed: {str(e)}"
+        aws_creds.last_sync_status = error_msg
+        db.session.commit()
+        current_app.logger.error(f"Sync failed for account {aws_creds.account_name}: {e}", exc_info=True)
+        flash(f"Failed to sync inventory for {aws_creds.account_name}. Error: {e}", 'danger')
+
+    return redirect(url_for('dashboard.index'))
+
+
+@bp.route('/add-account', methods=['POST'])
+@login_required
+def add_account():
+    """Adds a new AWS account to the system."""
+    security_service = SecurityService()
+    
+    account_name = request.form.get('account_name')
+    auth_type = request.form.get('auth_type')
+    default_region = request.form.get('default_region') or None
+    
+    if AWSCredentials.query.filter_by(account_name=account_name, user_id=current_user.id).first():
+        flash('An account with this name already exists.', 'danger')
+        return redirect(url_for('dashboard.index'))
+    
+    common_data = {
+        'account_name': account_name,
+        'auth_type': auth_type,
+        'default_region': default_region,
+        'user_id': current_user.id
+    }
+    
+    if auth_type == 'access_key':
+        access_key = request.form.get('aws_access_key_id')
+        secret_key = request.form.get('aws_secret_access_key')
+        
+        if not all([account_name, access_key, secret_key]):
+            flash('All fields are required for Access Key authentication.', 'danger')
+            return redirect(url_for('dashboard.index'))
+            
+        encrypted_secret = security_service.encrypt_data(secret_key)
+        new_creds = AWSCredentials(
+            **common_data,
+            aws_access_key_id=access_key,
+            encrypted_aws_secret_access_key=encrypted_secret
+        )
+    elif auth_type == 'iam_role':
+        role_arn = request.form.get('role_arn')
+        if not all([account_name, role_arn]):
+            flash('Account Name and Role ARN are required for IAM Role authentication.', 'danger')
+            return redirect(url_for('dashboard.index'))
+        new_creds = AWSCredentials(
+            **common_data,
+            role_arn=role_arn
+        )
+    else:
+        flash('Invalid authentication type specified.', 'danger')
+        return redirect(url_for('dashboard.index'))
+        
+    db.session.add(new_creds)
+    db.session.commit()
+    flash(f'AWS account "{account_name}" added successfully.', 'success')
+    return redirect(url_for('dashboard.index'))
+
+# --- API Endpoints for DataTables ---
+
+def get_base_query(model):
+    """Helper to create a base query filtered by the current user's accounts."""
+    return model.query.join(AWSCredentials).filter(AWSCredentials.user_id == current_user.id)
+
+def process_datatable_request(query, columns, search_columns):
+    """Helper to handle DataTables server-side processing."""
+    
+    # Search
+    search_value = request.args.get('search[value]')
+    if search_value:
+        search_filters = [col.like(f"%{search_value}%") for col in search_columns]
+        query = query.filter(db.or_(*search_filters))
+    
+    total_filtered = query.count()
+
+    # Sorting
+    order = []
+    i = 0
+    while True:
+        col_index = request.args.get(f'order[{i}][column]')
+        if col_index is None:
+            break
+        col_name_key = request.args.get(f'columns[{col_index}][data]')
+        col_name = columns.get(col_name_key)
+        
+        if col_name:
+            descending = request.args.get(f'order[{i}][dir]') == 'desc'
+            col = col_name.desc() if descending else col_name.asc()
+            order.append(col)
+        i += 1
+    if order:
+        query = query.order_by(*order)
+
+    # Pagination
+    start = request.args.get('start', type=int)
+    length = request.args.get('length', type=int)
+    query = query.offset(start).limit(length)
+    
+    return query, total_filtered
+
+@bp.route('/api/instances', methods=['GET'])
+@login_required
+def get_instances():
+
+    query = get_base_query(EC2Instance).join(VPC, EC2Instance.vpc_id_str == VPC.vpc_id, isouter=True)
+    
+    columns = {
+        'name': EC2Instance.name,
+        'instance_id': EC2Instance.instance_id,
+        'account_name': AWSCredentials.account_name,
+        'instance_type': EC2Instance.instance_type,
+        'state': EC2Instance.state,
+        'region': EC2Instance.region,
+        'vpc_name': VPC.name,
+    }
+    search_cols = [EC2Instance.instance_id, EC2Instance.name, EC2Instance.public_ip, EC2Instance.private_ip, VPC.name]
+    
+    query, total_filtered = process_datatable_request(query, columns, search_cols)
+    
+    data = [{
+        'instance_id': inst.instance_id,
+        'name': inst.name,
+        'account_name': inst.aws_account.account_name,
+        'instance_type': inst.instance_type,
+        'state': inst.state,
+        'region': inst.region,
+        'public_ip': inst.public_ip or 'N/A',
+        'private_ip': inst.private_ip or 'N/A',
+        'vpc_name': inst.vpc.name if inst.vpc else 'N/A'
+    } for inst in query.all()]
+    
+    return jsonify({
+        'data': data,
+        'recordsFiltered': total_filtered,
+        'recordsTotal': get_base_query(EC2Instance).count(),
+        'draw': request.args.get('draw', type=int),
+    })
+
+@bp.route('/api/vpcs', methods=['GET'])
+@login_required
+def get_vpcs():
+    query = get_base_query(VPC)
+    columns = {'name': VPC.name, 'vpc_id': VPC.vpc_id, 'account_name': AWSCredentials.account_name, 'cidr_block': VPC.cidr_block}
+    search_cols = [VPC.name, VPC.vpc_id, VPC.cidr_block, AWSCredentials.account_name]
+    
+    query, total_filtered = process_datatable_request(query, columns, search_cols)
+
+    data = [{
+        'name': vpc.name,
+        'vpc_id': vpc.vpc_id,
+        'account_name': vpc.aws_account.account_name,
+        'region': vpc.region,
+        'cidr_block': vpc.cidr_block,
+        'is_default': 'Yes' if vpc.is_default else 'No',
+    } for vpc in query.all()]
+    
+    return jsonify({
+        'data': data,
+        'recordsFiltered': total_filtered,
+        'recordsTotal': get_base_query(VPC).count(),
+        'draw': request.args.get('draw', type=int),
+    })
+
+@bp.route('/api/subnets', methods=['GET'])
+@login_required
+def get_subnets():
+    query = get_base_query(Subnet).join(VPC, Subnet.vpc_id_str == VPC.vpc_id, isouter=True)
+    columns = {'name': Subnet.name, 'subnet_id': Subnet.subnet_id, 'vpc_name': VPC.name, 'cidr_block': Subnet.cidr_block}
+    search_cols = [Subnet.name, Subnet.subnet_id, VPC.name, Subnet.cidr_block, Subnet.availability_zone]
+    
+    query, total_filtered = process_datatable_request(query, columns, search_cols)
+
+    data = [{
+        'name': subnet.name,
+        'subnet_id': subnet.subnet_id,
+        'account_name': subnet.aws_account.account_name,
+        'vpc_name': subnet.vpc.name if subnet.vpc else 'N/A',
+        'region': subnet.region,
+        'availability_zone': subnet.availability_zone,
+        'cidr_block': subnet.cidr_block,
+    } for subnet in query.all()]
+    
+    return jsonify({
+        'data': data,
+        'recordsFiltered': total_filtered,
+        'recordsTotal': get_base_query(Subnet).count(),
+        'draw': request.args.get('draw', type=int),
+    })
+
+@bp.route('/api/security-groups', methods=['GET'])
+@login_required
+def get_security_groups():
+    query = get_base_query(SecurityGroup).join(VPC, SecurityGroup.vpc_id_str == VPC.vpc_id, isouter=True)
+    columns = {'group_name': SecurityGroup.group_name, 'group_id': SecurityGroup.group_id, 'vpc_name': VPC.name}
+    search_cols = [SecurityGroup.group_name, SecurityGroup.group_id, VPC.name, SecurityGroup.description]
+    
+    query, total_filtered = process_datatable_request(query, columns, search_cols)
+
+    data = [{
+        'group_name': sg.group_name,
+        'group_id': sg.group_id,
+        'account_name': sg.aws_account.account_name,
+        'vpc_name': sg.vpc.name if sg.vpc else 'N/A',
+        'region': sg.region,
+        'description': sg.description,
+    } for sg in query.all()]
+    
+    return jsonify({
+        'data': data,
+        'recordsFiltered': total_filtered,
+        'recordsTotal': get_base_query(SecurityGroup).count(),
+        'draw': request.args.get('draw', type=int),
+    })
+
+@bp.route('/api/amis', methods=['GET'])
+@login_required
+def get_amis():
+    query = get_base_query(AMI)
+    columns = {'name': AMI.name, 'image_id': AMI.image_id, 'owner_id': AMI.owner_id}
+    search_cols = [AMI.name, AMI.image_id, AMI.owner_id]
+    
+    query, total_filtered = process_datatable_request(query, columns, search_cols)
+
+    data = [{
+        'name': ami.name,
+        'image_id': ami.image_id,
+        'account_name': ami.aws_account.account_name,
+        'region': ami.region,
+        'owner_id': ami.owner_id,
+        'creation_date': ami.creation_date.strftime("%Y-%m-%d") if ami.creation_date else 'N/A',
+    } for ami in query.all()]
+    
+    return jsonify({
+        'data': data,
+        'recordsFiltered': total_filtered,
+        'recordsTotal': get_base_query(AMI).count(),
+        'draw': request.args.get('draw', type=int),
+    })
+
+@bp.route('/api/snapshots', methods=['GET'])
+@login_required
+def get_snapshots():
+    query = get_base_query(Snapshot)
+    columns = {'snapshot_id': Snapshot.snapshot_id, 'volume_id': Snapshot.volume_id, 'state': Snapshot.state}
+    search_cols = [Snapshot.snapshot_id, Snapshot.volume_id]
+    
+    query, total_filtered = process_datatable_request(query, columns, search_cols)
+
+    data = [{
+        'snapshot_id': snap.snapshot_id,
+        'account_name': snap.aws_account.account_name,
+        'region': snap.region,
+        'volume_id': snap.volume_id,
+        'volume_size_gb': snap.volume_size_gb,
+        'state': snap.state,
+        'start_time': snap.start_time.strftime("%Y-%m-%d %H:%M") if snap.start_time else 'N/A',
+    } for snap in query.all()]
+    
+    return jsonify({
+        'data': data,
+        'recordsFiltered': total_filtered,
+        'recordsTotal': get_base_query(Snapshot).count(),
+        'draw': request.args.get('draw', type=int),
+    })
+
+    ------- end --------------------------------------------------------------
+
+
+
+
+
+-------- base.html 23-10-2025 ---------------------------------------------
+
+
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }} - AWS Inventory</title>
+
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@4.10.1/dist/full.css" rel="stylesheet" type="text/css" />
+    <script src="https://cdn.tailwindcss.com"></script> <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.1.1/css/all.min.css">
+
+    <link rel="stylesheet" href="https://cdn.datatables.net/1.11.5/css/jquery.dataTables.min.css">
+
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.datatables.net/1.11.5/js/jquery.dataTables.min.js"></script>
+</head>
+<body class="bg-base-200 font-sans min-h-screen">
+    <div class="navbar bg-base-100 shadow-lg sticky top-0 z-30">
+        <div class="flex-1">
+            <a href="{{ url_for('dashboard.index') }}" class="btn btn-ghost text-xl">
+                <i class="fas fa-cloud text-primary"></i>
+                AWS Inventory
+            </a>
+        </div>
+        <div class="flex-none">
+            {% if current_user.is_authenticated %}
+                <span class="text-base-content mr-4">Welcome, {{ current_user.username }}!</span>
+                <a href="{{ url_for('auth.logout') }}" class="btn btn-ghost">Logout</a>
+            {% else %}
+                <a href="{{ url_for('auth.login') }}" class="btn btn-ghost">Login</a>
+            {% endif %}
+        </div>
+    </div>
+
+    <main class="container mx-auto mt-6 p-4">
+        <div id="toast-container" class="toast toast-top toast-end z-50"></div>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                <div role="alert" class="alert {{ 'alert-success' if category == 'success' else ('alert-error' if category == 'danger' else 'alert-info') }} mb-4 shadow-md">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
+                        {% if category == 'success' %}
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        {% else %}
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        {% endif %}
+                    </svg>
+                    <span>{{ message }}</span>
+                </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        {% block content %}{% endblock %}
+    </main>
+
+<script>
+    // --- Global Helper Functions ---
+
+    /**
+     * Handles switching between tabs in the UI.
+     * Hides all tab content, removes active class from all tab links,
+     * then shows the selected tab content and marks its link as active.
+     */
+    function changeTab(event, tabID) {
+        event.preventDefault();
+        // Hide all content panels
+        document.querySelectorAll('.tab-content').forEach(tab => tab.classList.add('hidden'));
+        // Deactivate all tab links
+        document.querySelectorAll('.tab').forEach(link => link.classList.remove('tab-active'));
+        // Show the target content panel
+        const targetTab = document.getElementById(tabID);
+        if (targetTab) {
+            targetTab.classList.remove('hidden');
+        }
+        // Activate the clicked tab link
+        event.currentTarget.classList.add('tab-active');
+    }
+
+    /**
+     * Displays a toast notification using DaisyUI's toast component.
+     * @param {string} message - The message to display.
+     * @param {string} [type='info'] - The type of toast ('success', 'error', 'warning', 'info').
+     */
+    function showToast(message, type = 'info') {
+        const toastContainer = document.getElementById('toast-container');
+        if (!toastContainer) return; // Exit if container not found
+
+        // Determine alert class based on type
+        let alertClass = 'alert-info'; // Default
+        if (type === 'success') alertClass = 'alert-success';
+        else if (type === 'error') alertClass = 'alert-error';
+        else if (type === 'warning') alertClass = 'alert-warning';
+
+        // Create the toast element
+        const toast = document.createElement('div');
+        // Add classes for styling, animation, and accessibility
+        toast.className = `alert ${alertClass} transition-all duration-300 transform translate-x-full opacity-0 shadow-lg`;
+        toast.setAttribute('role', 'alert');
+        toast.innerHTML = `<span>${message}</span>`; // Simple message content
+
+        // Append to container
+        toastContainer.appendChild(toast);
+
+        // Animate in (needs slight delay for CSS transition)
+        setTimeout(() => {
+            toast.classList.remove('translate-x-full', 'opacity-0');
+        }, 10); // 10ms delay
+
+        // Set timeout to animate out and remove the element
+        setTimeout(() => {
+            toast.classList.add('opacity-0', 'translate-x-full');
+            // Remove the element after the transition completes
+            setTimeout(() => toast.remove(), 500); // Wait for animation (500ms)
+        }, 5000); // Display for 5 seconds
+    }
+</script>
+
+{% block scripts %}{% endblock %}
+
+</body>
+</html>
+
+----- end -------------------------------
+
+
+-------- index - 23-10-2025 -------------------------
+
+{% extends "base.html" %}
+
+{% block content %}
+<!-- Page Header and Account Management Card -->
+<div class="card bg-base-100 shadow-xl mb-6 transition-all duration-300 hover:shadow-2xl">
+    <div class="card-body">
+        <h1 class="card-title text-2xl">AWS Account Management</h1>
+        <p class="text-base-content text-opacity-70">Add AWS accounts or trigger a background inventory sync.</p>
+        <div class="card-actions justify-start items-center mt-4 space-x-2 md:space-x-4 flex-wrap gap-2">
+            <!-- Add Account Button triggers the modal -->
+            <button class="btn btn-primary" onclick="add_account_modal.showModal()">
+                <i class="fas fa-plus mr-1"></i>Add AWS Account
+            </button>
+
+            <!-- Sync Form -->
+            <form id="syncForm" class="flex items-center flex-wrap gap-2">
+                <select id="account_id_select" name="account_id" class="select select-bordered w-full max-w-xs flex-grow" required>
+                    <option disabled selected value="">Select Account to Sync</option>
+                    {% for account in aws_accounts %}
+                        <option value="{{ account.id }}" data-name="{{ account.account_name }}" data-status="{{ account.last_sync_status }}">{{ account.account_name }} ({{ account.last_sync_status }})</option>
+                    {% endfor %}
+                </select>
+                <button type="submit" id="syncButton" class="btn btn-accent">
+                    <span class="loading loading-spinner hidden" id="sync-spinner"></span>
+                    <i class="fas fa-sync-alt mr-1" id="sync-icon"></i>
+                    <span id="sync-text">Sync Inventory</span>
+                </button>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Asset Summary Card -->
+<div class="card bg-base-100 shadow-xl mb-6 transition-all duration-300 hover:shadow-2xl">
+    <div class="card-body">
+        <h2 class="card-title mb-4">Asset Summary</h2>
+        <div class="stats stats-vertical lg:stats-horizontal shadow w-full overflow-x-auto">
+            <div class="stat">
+                <div class="stat-figure text-primary"><i class="fas fa-server text-2xl"></i></div>
+                <div class="stat-title">EC2 Instances</div>
+                <div class="stat-value text-primary">{{ stats.instance_count | default('0') }}</div>
+            </div>
+            <div class="stat">
+                <div class="stat-figure text-secondary"><i class="fas fa-network-wired text-2xl"></i></div>
+                <div class="stat-title">VPCs</div>
+                <div class="stat-value text-secondary">{{ stats.vpc_count | default('0') }}</div>
+            </div>
+             <div class="stat">
+                <div class="stat-figure text-accent"><i class="fas fa-code-branch text-2xl"></i></div>
+                <div class="stat-title">Subnets</div>
+                <div class="stat-value">{{ stats.subnet_count | default('0') }}</div>
+            </div>
+            <div class="stat">
+                <div class="stat-figure text-info"><i class="fas fa-shield-alt text-2xl"></i></div>
+                <div class="stat-title">Security Groups</div>
+                <div class="stat-value">{{ stats.sg_count | default('0') }}</div>
+            </div>
+             <div class="stat">
+                <div class="stat-figure text-warning"><i class="fas fa-compact-disc text-2xl"></i></div>
+                <div class="stat-title">AMIs</div>
+                <div class="stat-value">{{ stats.ami_count | default('0') }}</div>
+            </div>
+            <div class="stat">
+                <div class="stat-figure text-error"><i class="fas fa-camera text-2xl"></i></div>
+                <div class="stat-title">Snapshots</div>
+                <div class="stat-value">{{ stats.snapshot_count | default('0') }}</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Data Tables Card -->
+<div class="card bg-base-100 shadow-xl transition-all duration-300 hover:shadow-2xl">
+    <div class="card-body">
+        <!-- DaisyUI Tab Navigation -->
+        <div role="tablist" class="tabs tabs-lifted mb-4">
+            <a role="tab" class="tab tab-active" href="#" onclick="changeTab(event, 'tab-instances')">EC2 Instances</a>
+            <a role="tab" class="tab" href="#" onclick="changeTab(event, 'tab-vpcs')">VPCs</a>
+            <a role="tab" class="tab" href="#" onclick="changeTab(event, 'tab-subnets')">Subnets</a>
+            <a role="tab" class="tab" href="#" onclick="changeTab(event, 'tab-sgs')">Security Groups</a>
+            <a role="tab" class="tab" href="#" onclick="changeTab(event, 'tab-amis')">AMIs</a>
+            <a role="tab" class="tab" href="#" onclick="changeTab(event, 'tab-snapshots')">Snapshots</a>
+        </div>
+
+        <!-- Tab Content Panels -->
+        <div id="tab-instances" class="tab-content">
+             <div class="overflow-x-auto">
+                <table id="instancesTable" class="table table-zebra table-sm w-full" style="width:100%">
+                    <thead>
+                        <tr>
+                            <th></th>
+                            <th>Name</th>
+                            <th>Instance ID</th>
+                            <th>State</th>
+                            <th>Type</th>
+                            <th>Region</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+        <div id="tab-vpcs" class="tab-content hidden">
+             <div class="overflow-x-auto">
+                <table id="vpcsTable" class="table table-zebra table-sm w-full" style="width:100%">
+                    <thead><tr><th>Name</th><th>VPC ID</th><th>Account</th><th>Region</th><th>CIDR Block</th><th>Default</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+        <div id="tab-subnets" class="tab-content hidden">
+             <div class="overflow-x-auto">
+                <table id="subnetsTable" class="table table-zebra table-sm w-full" style="width:100%">
+                    <thead><tr><th>Name</th><th>Subnet ID</th><th>Account</th><th>VPC</th><th>Region</th><th>AZ</th><th>CIDR Block</th></tr></thead>
+                     <tbody></tbody>
+                </table>
+            </div>
+        </div>
+        <div id="tab-sgs" class="tab-content hidden">
+             <div class="overflow-x-auto">
+                <table id="sgsTable" class="table table-zebra table-sm w-full" style="width:100%">
+                    <thead><tr><th>Group Name</th><th>Group ID</th><th>Account</th><th>VPC</th><th>Region</th><th>Description</th></tr></thead>
+                     <tbody></tbody>
+                </table>
+            </div>
+        </div>
+        <div id="tab-amis" class="tab-content hidden">
+             <div class="overflow-x-auto">
+                <table id="amisTable" class="table table-zebra table-sm w-full" style="width:100%">
+                    <thead><tr><th>Name</th><th>Image ID</th><th>Account</th><th>Region</th><th>Owner ID</th><th>Creation Date</th></tr></thead>
+                     <tbody></tbody>
+                </table>
+            </div>
+        </div>
+        <div id="tab-snapshots" class="tab-content hidden">
+             <div class="overflow-x-auto">
+                <table id="snapshotsTable" class="table table-zebra table-sm w-full" style="width:100%">
+                    <thead><tr><th>Snapshot ID</th><th>Account</th><th>Region</th><th>Volume ID</th><th>Size (GB)</th><th>State</th><th>Started</th></tr></thead>
+                     <tbody></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Add Account Modal -->
+<dialog id="add_account_modal" class="modal modal-bottom sm:modal-middle">
+    <div class="modal-box">
+        <form method="dialog"> <button class="btn btn-sm btn-circle btn-ghost absolute right-2 top-2">✕</button> </form>
+        <form action="{{ url_for('dashboard.add_account') }}" method="post" id="addAccountForm">
+            <h3 class="font-bold text-lg mb-4">Add New AWS Account</h3>
+            <div class="form-control w-full"><label class="label"><span class="label-text">Account Name *</span></label><input type="text" name="account_name" required class="input input-bordered w-full" /></div>
+            <div class="form-control w-full mt-2"><label class="label"><span class="label-text">Default Region (Optional)</span></label><input type="text" name="default_region" placeholder="e.g., us-east-1" class="input input-bordered w-full" /></div>
+            <div class="form-control w-full mt-2"><label class="label"><span class="label-text">Authentication Type *</span></label><select name="auth_type" id="auth_type" class="select select-bordered w-full"><option value="access_key" selected>Access Key / Secret Key</option><option value="iam_role">IAM Role</option></select></div>
+            <div id="access_key_fields"><div class="form-control w-full mt-2"><label class="label"><span class="label-text">AWS Access Key ID *</span></label><input type="text" name="aws_access_key_id" id="aws_access_key_id" class="input input-bordered w-full" /></div><div class="form-control w-full mt-2"><label class="label"><span class="label-text">AWS Secret Access Key *</span></label><div class="join w-full"><input type="password" name="aws_secret_access_key" id="aws_secret_access_key" class="input input-bordered join-item w-full" /><button type="button" class="btn join-item" id="toggleSecret"><i class="fas fa-eye"></i></button></div></div></div>
+            <div id="iam_role_fields" class="hidden"><div class="form-control w-full mt-2"><label class="label"><span class="label-text">IAM Role ARN *</span></label><input type="text" name="role_arn" id="role_arn" class="input input-bordered w-full" placeholder="arn:aws:iam::123456789012:role/YourRole" /></div></div>
+            <div class="modal-action mt-6"><button type="submit" class="btn btn-primary">Save Account</button><form method="dialog"><button class="btn">Cancel</button></form></div>
+        </form>
+    </div>
+     <form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// --- Global Variables ---
+let pollInterval;
+let dataTables = {};
+
+// --- Sync Status Polling ---
+async function pollSyncStatus() {
+    try {
+        const response = await fetch("{{ url_for('dashboard.get_account_sync_status') }}");
+        if (!response.ok) { console.error('Poll failed:', response.status); return; }
+        const statuses = await response.json();
+        let isAnyAccountSyncing = false;
+        $('#account_id_select option').each(function() {
+            const accountId = $(this).val();
+            if (accountId && statuses[accountId]) {
+                const { status } = statuses[accountId];
+                const accountName = $(this).data('name');
+                if (accountName) {
+                    const displayStatus = status.length > 30 ? status.substring(0, 27) + '...' : status;
+                    $(this).text(`${accountName} (${displayStatus})`);
+                    if (status && status.toLowerCase().includes('syncing')) { isAnyAccountSyncing = true; }
+                }
+            }
+        });
+        if (!isAnyAccountSyncing && pollInterval) {
+            clearInterval(pollInterval); pollInterval = null;
+             const selectedAccId = $('#account_id_select').val();
+             if (selectedAccId && statuses[selectedAccId] && !statuses[selectedAccId].status.toLowerCase().includes('syncing')){
+                 $('#syncButton').prop('disabled', false); $('#sync-icon').removeClass('hidden'); $('#sync-spinner').addClass('hidden'); $('#sync-text').text('Sync Inventory');
+             } else if (!selectedAccId){ $('#syncButton').prop('disabled', true); }
+        }
+    } catch (error) { console.error('Polling error:', error); if (pollInterval) { clearInterval(pollInterval); pollInterval = null; } }
+}
+function startPolling() { if (pollInterval) clearInterval(pollInterval); pollSyncStatus(); pollInterval = setInterval(pollSyncStatus, 5000); }
+
+// --- DataTables: Child Row Formatting (EC2) ---
+function formatEC2ChildRow(d) {
+    const publicIp = d.public_ip || 'N/A';
+    const privateIp = d.private_ip || 'N/A';
+    const vpcName = d.vpc_name || 'N/A';
+    const subnetId = d.subnet_id || 'N/A';
+    const amiId = d.ami_id || 'N/A';
+    const accountName = d.account_name || 'N/A';
+    return `<div class="p-2 bg-base-200 rounded-md">
+            <table class="table table-sm w-full">
+            <tbody>
+                <tr><td class="font-semibold w-1/4">Public IP:</td><td>${publicIp}</td></tr>
+                <tr><td class="font-semibold w-1/4">Private IP:</td><td>${privateIp}</td></tr>
+                <tr><td class="font-semibold w-1/4">VPC:</td><td>${vpcName}</td></tr>
+                <tr><td class="font-semibold w-1/4">Subnet ID:</td><td>${subnetId}</td></tr>
+                <tr><td class="font-semibold w-1/4">AMI ID:</td><td>${amiId}</td></tr>
+                <tr><td class="font-semibold w-1/4">Account:</td><td>${accountName}</td></tr>
+             </tbody>
+            </table>
+            </div>`;
+}
+
+// --- DataTables: Initialization Helper ---
+function initializeDataTable(tableId, ajaxUrl, columnsConfig) {
+    console.log(`[INIT] Starting DataTable: ${tableId}`);
+    
+    if (!$(tableId).length) {
+        console.error(`[ERROR] Table ${tableId} not found in DOM`);
+        return null;
+    }
+    
+    if ($.fn.DataTable.isDataTable(tableId)) {
+        console.log(`[CLEANUP] Destroying existing: ${tableId}`);
+        try {
+            $(tableId).DataTable().clear().destroy();
+            $(tableId).empty();
+        } catch(e) {
+            console.error("[ERROR] Destroy failed:", e);
+        }
+    }
+    
+    try {
+        const dt = $(tableId).DataTable({
+            processing: true,
+            serverSide: true,
+            ajax: {
+                url: ajaxUrl,
+                type: "GET",
+                dataSrc: function(json) {
+                    console.log(`[DATA] ${tableId} received ${json.data ? json.data.length : 0} records`);
+                    return json.data || [];
+                },
+                error: function (xhr, error, thrown) {
+                    console.error(`[AJAX ERROR] ${tableId}:`, xhr.status, xhr.responseText);
+                    showToast(`Failed to load ${tableId.substring(1)}. Check console.`, 'error');
+                }
+            },
+            columns: columnsConfig,
+            pageLength: 10,
+            lengthMenu: [[10, 25, 50, -1], [10, 25, 50, "All"]],
+            language: {
+                processing: '<span class="loading loading-dots loading-lg text-primary"></span>',
+                emptyTable: "No data available",
+                zeroRecords: "No matching records found"
+            },
+            createdRow: function(row, data, dataIndex) {
+                $(row).addClass('hover');
+            },
+            drawCallback: function(settings) {
+                console.log(`[DRAW] ${tableId} completed`);
+            },
+            initComplete: function(settings, json) {
+                console.log(`[SUCCESS] ${tableId} initialized`);
+            },
+            deferRender: true,
+            autoWidth: false,
+            scrollCollapse: true
+        });
+        
+        dataTables[tableId] = dt;
+        return dt;
+    } catch (e) {
+        console.error(`[CRITICAL] Failed to init ${tableId}:`, e);
+        showToast(`Error initializing ${tableId.substring(1)}`, 'error');
+        return null;
+    }
+}
+
+// --- DataTables: Link Renderer ---
+function renderUrl(data, type, row) {
+    if (type === 'display' && data && row.console_url) {
+        return `<a href="${row.console_url}" target="_blank" class="link link-primary link-hover">${data}</a>`;
+    }
+    return data || 'N/A';
+}
+
+// --- Document Ready ---
+$(document).ready(function() {
+    console.log("[APP] Document ready - Starting initialization");
+    startPolling();
+    $('#account_id_select').on('change', function() { $('#syncButton').prop('disabled', !this.value); });
+
+    // --- Sync Button Event Listener ---
+    $('#syncForm').on('submit', async function(e) {
+        e.preventDefault();
+        const syncButton = $('#syncButton');
+        const syncIcon = $('#sync-icon');
+        const syncSpinner = $('#sync-spinner');
+        const syncText = $('#sync-text');
+        const accountSelect = $('#account_id_select');
+        const selectedAccountId = accountSelect.val();
+        
+        if (!selectedAccountId) {
+            showToast('Please select an account to sync.', 'warning');
+            return;
+        }
+        
+        console.log("[SYNC] Starting sync for account:", selectedAccountId);
+        syncButton.prop('disabled', true);
+        syncIcon.addClass('hidden');
+        syncSpinner.removeClass('hidden');
+        syncText.text('Starting...');
+        
+        try {
+            const formData = new FormData(this);
+            const response = await fetch("{{ url_for('dashboard.sync_inventory') }}", {
+                method: 'POST',
+                body: formData
+            });
+            
+            const result = await response.json();
+            console.log("[SYNC] Response:", response.status, result);
+            
+            if (response.status === 202 || response.status === 200) {
+                showToast(result.message, result.status === 'warning' ? 'warning' : 'success');
+                syncText.text('Syncing...');
+                startPolling();
+            } else {
+                showToast(result.message || 'Failed to start sync.', 'error');
+                syncButton.prop('disabled', false);
+                syncIcon.removeClass('hidden');
+                syncSpinner.addClass('hidden');
+                syncText.text('Sync Inventory');
+            }
+        } catch (error) {
+            console.error("[SYNC ERROR]:", error);
+            showToast('Network error occurred.', 'error');
+            syncButton.prop('disabled', false);
+            syncIcon.removeClass('hidden');
+            syncSpinner.addClass('hidden');
+            syncText.text('Sync Inventory');
+        }
+    });
+
+    // --- Add Account Modal: Auth Type Toggle ---
+    $('#auth_type').on('change', function() {
+        const isAccessKey = this.value === 'access_key';
+        $('#access_key_fields').toggleClass('hidden', !isAccessKey);
+        $('#iam_role_fields').toggleClass('hidden', isAccessKey);
+        $('#aws_access_key_id').prop('required', isAccessKey);
+        $('#aws_secret_access_key').prop('required', isAccessKey);
+        $('#role_arn').prop('required', !isAccessKey);
+    }).trigger('change');
+    
+    $('#toggleSecret').on('click', function () {
+        const passwordInput = $('#aws_secret_access_key');
+        const icon = $(this).find('i');
+        if (passwordInput.attr('type') === 'password') {
+            passwordInput.attr('type', 'text');
+            icon.removeClass('fa-eye').addClass('fa-eye-slash');
+        } else {
+            passwordInput.attr('type', 'password');
+            icon.removeClass('fa-eye-slash').addClass('fa-eye');
+        }
+    });
+
+    // --- Initialize All DataTables ---
+    console.log("[TABLES] Initializing all DataTables...");
+    
+    let dt_instances = initializeDataTable('#instancesTable', "{{ url_for('dashboard.get_instances') }}", [
+        {
+            className: 'details-control',
+            orderable: false,
+            data: null,
+            defaultContent: '<i class="fas fa-plus-circle text-success cursor-pointer p-1"></i>'
+        },
+        { data: "name" },
+        { data: "instance_id", render: renderUrl },
+        {
+            data: "state",
+            render: function(data) {
+                let c = 'badge-ghost';
+                if (data === 'running') c = 'badge-success';
+                if (data === 'stopped') c = 'badge-error';
+                return data ? `<span class="badge ${c} badge-sm">${data}</span>` : 'N/A';
+            }
+        },
+        { data: "instance_type" },
+        { data: "region" }
+    ]);
+    
+    initializeDataTable('#vpcsTable', "{{ url_for('dashboard.get_vpcs') }}", [
+        { data: "name" },
+        { data: "vpc_id", render: renderUrl },
+        { data: "account_name" },
+        { data: "region" },
+        { data: "cidr_block" },
+        { data: "is_default" }
+    ]);
+    
+    initializeDataTable('#subnetsTable', "{{ url_for('dashboard.get_subnets') }}", [
+        { data: "name" },
+        { data: "subnet_id", render: renderUrl },
+        { data: "account_name" },
+        { data: "vpc_name" },
+        { data: "region" },
+        { data: "availability_zone" },
+        { data: "cidr_block" }
+    ]);
+    
+    initializeDataTable('#sgsTable', "{{ url_for('dashboard.get_security_groups') }}", [
+        { data: "group_name" },
+        { data: "group_id", render: renderUrl },
+        { data: "account_name" },
+        { data: "vpc_name" },
+        { data: "region" },
+        { data: "description" }
+    ]);
+    
+    initializeDataTable('#amisTable', "{{ url_for('dashboard.get_amis') }}", [
+        { data: "name" },
+        { data: "image_id", render: renderUrl },
+        { data: "account_name" },
+        { data: "region" },
+        { data: "owner_id" },
+        { data: "creation_date" }
+    ]);
+    
+    initializeDataTable('#snapshotsTable', "{{ url_for('dashboard.get_snapshots') }}", [
+        { data: "snapshot_id", render: renderUrl },
+        { data: "account_name" },
+        { data: "region" },
+        { data: "volume_id" },
+        { data: "volume_size_gb" },
+        { data: "state" },
+        { data: "start_time" }
+    ]);
+
+    // --- EC2 Child Row Expansion Logic ---
+    $('#instancesTable tbody').on('click', 'td.details-control', function () {
+        var tr = $(this).closest('tr');
+        
+        if (!dt_instances) {
+            console.error("[ERROR] DataTable not ready");
+            showToast('Table not initialized yet.', 'warning');
+            return;
+        }
+        
+        var row = dt_instances.row(tr);
+        
+        if (!row || typeof row.data !== 'function') {
+            console.error("[ERROR] Invalid row");
+            return;
+        }
+        
+        const rowData = row.data();
+        if (!rowData) {
+            console.error("[ERROR] No row data");
+            showToast('Could not load details.', 'error');
+            return;
+        }
+        
+        if (row.child.isShown()) {
+            row.child.hide();
+            tr.removeClass('shown');
+            $(this).html('<i class="fas fa-plus-circle text-success cursor-pointer p-1"></i>');
+        } else {
+            try {
+                row.child(formatEC2ChildRow(rowData)).show();
+                tr.addClass('shown');
+                $(this).html('<i class="fas fa-minus-circle text-error cursor-pointer p-1"></i>');
+            } catch(e) {
+                console.error("[ERROR] Child row failed:", e);
+                showToast('Error displaying details.', 'error');
+            }
+        }
+    });
+
+    console.log("[APP] Initialization complete!");
+});
+</script>
+{% endblock %}
+
+
+----------------- end ---------------------------------------
+
+------ group html ----
+
+
+<script>
+document.getElementById('createGroupForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    
+    // Get form data
+    const formData = new FormData(this);
+    
+    // Get selected instances
+    const selectedInstances = Array.from(
+        document.querySelectorAll('input[name="instance_ids[]"]:checked')
+    ).map(cb => cb.value);
+    
+    selectedInstances.forEach(id => {
+        formData.append('instance_ids[]', id);
+    });
+    
+    // Submit to backend
+    fetch('/dashboard/backup-groups/create', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            alert('Backup group created!');
+            location.reload();
+        } else {
+            alert('Error: ' + data.message);
+        }
+    })
+    .catch(error => {
+        alert('Error: ' + error);
+    });
+});
+</script>
+
+
+----- group html ---
+
+
+        <form action="{{ url_for('dashboard.run_backup_now_from_groups') }}" method="POST">
+            <input type="hidden" id="backup_group_id" name="group_id" value="">
+
+-----
+
+---- init --------------
+
+
+"""
+app/__init__.py - Application Factory
+Blueprint registration with correct url_prefix
+Fixed: Added root route redirect and updated Celery configuration
+"""
+from flask import Flask, redirect, url_for
+from flask_sqlalchemy import SQLAlchemy
+from flask_login import LoginManager, current_user
+from flask_migrate import Migrate
+from config import Config
+from .extensions import celery
+
+db = SQLAlchemy()
+login_manager = LoginManager()
+login_manager.login_view = 'auth.login'
+login_manager.login_message_category = 'info'
+
+
+def create_app(config_class=Config):
+    """Application factory function."""
+    app = Flask(__name__)
+    app.config.from_object(config_class)
+    celery.conf.update(app.config)
+
+    if not app.config['ENCRYPTION_KEY']:
+        raise ValueError("ENCRYPTION_KEY is missing.")
+
+    db.init_app(app)
+    Migrate(app, db)
+    login_manager.init_app(app)
+
+    # Simple Celery configuration - just the basics
+    # celery.conf.update(
+    #     broker_url=app.config['BROKER_URL'],
+    #     result_backend=app.config['RESULT_BACKEND']
+    # )
+    celery.conf.update(
+        CELERY_BROKER_URL=app.config['CELERY_BROKER_URL'],
+        CELERY_RESULT_BACKEND=app.config['CELERY_RESULT_BACKEND']
+        )
+
+
+    class ContextTask(celery.Task):
+        def __call__(self, *args, **kwargs):
+            with app.app_context():
+                return self.run(*args, **kwargs)
+    
+    celery.Task = ContextTask
+
+    # Root route - redirect to dashboard
+    @app.route('/')
+    def root():
+        if current_user.is_authenticated:
+            return redirect(url_for('dashboard.index'))
+        return redirect(url_for('auth.login'))
+    
+    @app.template_filter('timeago')
+    def timeago_filter(datetime_obj):
+        if not datetime_obj:
+            return 'Never'
+        diff = datetime.utcnow() - datetime_obj
+        if diff.days > 7:
+            return datetime_obj.strftime('%Y-%m-%d')
+        elif diff.days > 0:
+            return f'{diff.days} days ago'
+        elif diff.seconds > 3600:
+            return f'{diff.seconds // 3600} hours ago'
+        else:
+            return f'{diff.seconds // 60} minutes ago'
+
+    # Register blueprints with correct url_prefix
+    from app.auth.routes import bp as auth_bp
+    app.register_blueprint(auth_bp, url_prefix='/auth')
+    
+    from app.dashboard.routes import bp as dashboard_bp
+    app.register_blueprint(dashboard_bp, url_prefix='/dashboard')
+
+    # Import tasks module to register them with Celery
+    from app import tasks
+
+    @login_manager.user_loader
+    def load_user(user_id):
+        from app.models import User
+        return db.session.get(User, int(user_id))
+
+    return app
+
+------ end -----
+
+
+
+--- database schema -----------
+
+
+
+
+(venv) root@sandani:/home/sandani/aws-dashboard# sqlite3 app.db ".schema alembic_version" ".schema amis" ".schema aws_credentials" ".schema backup_groups" ".schema backup_job_logs" ".schema backup_policies" ".schema elastic_ips" ".schema enis" ".schema instance_backup_group_association" ".schema instance_sg_association" ".schema instances" ".schema route_tables" ".schema routes" ".schema security_group_rules" ".schema security_groups" ".schema snapshots" ".schema subnets" ".schema users" ".schema vpcs"
+CREATE TABLE alembic_version (
+        version_num VARCHAR(32) NOT NULL,
+        CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
+);
+CREATE TABLE amis (
+        id INTEGER NOT NULL,
+        image_id VARCHAR(64) NOT NULL,
+        aws_account_id INTEGER NOT NULL,
+        region VARCHAR(32),
+        name VARCHAR(255),
+        creation_date DATETIME,
+        owner_id VARCHAR(64),
+        is_public BOOLEAN,
+        tags JSON,
+        PRIMARY KEY (id),
+        FOREIGN KEY(aws_account_id) REFERENCES aws_credentials (id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX ix_amis_image_id ON amis (image_id);
+CREATE INDEX ix_amis_name ON amis (name);
+CREATE INDEX ix_amis_region ON amis (region);
+CREATE TABLE aws_credentials (
+        id INTEGER NOT NULL,
+        account_name VARCHAR(120) NOT NULL,
+        auth_type VARCHAR(20) NOT NULL,
+        aws_access_key_id VARCHAR(120),
+        encrypted_aws_secret_access_key VARCHAR(512),
+        role_arn VARCHAR(255),
+        default_region VARCHAR(32),
+        user_id INTEGER NOT NULL,
+        last_sync_status VARCHAR(255),
+        last_sync_time DATETIME,
+        server_username VARCHAR(120),
+        encrypted_server_password VARCHAR(512),
+        encrypted_pem_key TEXT,
+        PRIMARY KEY (id),
+        FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX ix_aws_credentials_account_name ON aws_credentials (account_name);
+CREATE TABLE backup_groups (
+        id INTEGER NOT NULL,
+        name VARCHAR(120) NOT NULL,
+        aws_account_id INTEGER NOT NULL,
+        PRIMARY KEY (id),
+        FOREIGN KEY(aws_account_id) REFERENCES aws_credentials (id) ON DELETE CASCADE
+);
+CREATE INDEX ix_backup_groups_name ON backup_groups (name);
+CREATE TABLE backup_job_logs (
+        id INTEGER NOT NULL,
+        group_id INTEGER,
+        instance_id_str VARCHAR(64) NOT NULL,
+        status VARCHAR(50) NOT NULL,
+        message TEXT,
+        start_time DATETIME,
+        end_time DATETIME,
+        backup_type VARCHAR(20) NOT NULL,
+        parent_ami_id VARCHAR(64),
+        is_incremental BOOLEAN,
+        ami_id_str VARCHAR(64),
+        snapshots_created JSON,
+        instance_type VARCHAR(64),
+        ami_used VARCHAR(64),
+        key_pair_name VARCHAR(255),
+        iam_role_arn VARCHAR(512),
+        vpc_id_str VARCHAR(64),
+        subnet_id_str VARCHAR(64),
+        availability_zone VARCHAR(64),
+        security_group_ids JSON,
+        private_ip VARCHAR(45),
+        public_ip VARCHAR(45),
+        elastic_ip_allocation_id VARCHAR(64),
+        region VARCHAR(32),
+        tags JSON,
+        user_data TEXT,
+        PRIMARY KEY (id),
+        FOREIGN KEY(group_id) REFERENCES backup_groups (id) ON DELETE SET NULL
+);
+CREATE INDEX ix_backup_job_logs_instance_id_str ON backup_job_logs (instance_id_str);
+CREATE TABLE backup_policies (
+        id INTEGER NOT NULL,
+        group_id INTEGER NOT NULL,
+        backup_strategy VARCHAR(20) NOT NULL,
+        ami_interval_value INTEGER NOT NULL,
+        ami_interval_unit VARCHAR(20) NOT NULL,
+        snapshot_interval_value INTEGER NOT NULL,
+        snapshot_interval_unit VARCHAR(20) NOT NULL,
+        retention_days INTEGER NOT NULL,
+        retention_count INTEGER,
+        last_ami_time DATETIME,
+        last_snapshot_time DATETIME,
+        last_run_time DATETIME,
+        is_active BOOLEAN NOT NULL,
+        PRIMARY KEY (id),
+        FOREIGN KEY(group_id) REFERENCES backup_groups (id) ON DELETE CASCADE,
+        UNIQUE (group_id)
+);
+CREATE TABLE elastic_ips (
+        id INTEGER NOT NULL,
+        public_ip VARCHAR(45),
+        aws_account_id INTEGER NOT NULL,
+        region VARCHAR(32),
+        allocation_id VARCHAR(64),
+        eni_id_str VARCHAR(64),
+        instance_id_str VARCHAR(64),
+        PRIMARY KEY (id),
+        FOREIGN KEY(aws_account_id) REFERENCES aws_credentials (id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX ix_elastic_ips_allocation_id ON elastic_ips (allocation_id);
+CREATE INDEX ix_elastic_ips_public_ip ON elastic_ips (public_ip);
+CREATE INDEX ix_elastic_ips_region ON elastic_ips (region);
+CREATE TABLE enis (
+        id INTEGER NOT NULL,
+        eni_id VARCHAR(64) NOT NULL,
+        aws_account_id INTEGER NOT NULL,
+        subnet_id_str VARCHAR(64),
+        region VARCHAR(32),
+        status VARCHAR(32),
+        description VARCHAR(1024),
+        private_ip VARCHAR(45),
+        public_ip VARCHAR(45),
+        PRIMARY KEY (id),
+        FOREIGN KEY(aws_account_id) REFERENCES aws_credentials (id) ON DELETE CASCADE,
+        FOREIGN KEY(subnet_id_str) REFERENCES subnets (subnet_id) ON DELETE SET NULL
+);
+CREATE UNIQUE INDEX ix_enis_eni_id ON enis (eni_id);
+CREATE INDEX ix_enis_region ON enis (region);
+CREATE INDEX ix_enis_subnet_id_str ON enis (subnet_id_str);
+CREATE TABLE instance_backup_group_association (
+        ec2_instance_id INTEGER NOT NULL,
+        backup_group_id INTEGER NOT NULL,
+        PRIMARY KEY (ec2_instance_id, backup_group_id),
+        FOREIGN KEY(backup_group_id) REFERENCES backup_groups (id) ON DELETE CASCADE,
+        FOREIGN KEY(ec2_instance_id) REFERENCES instances (id) ON DELETE CASCADE
+);
+CREATE TABLE instance_sg_association (
+        ec2_instance_id INTEGER NOT NULL,
+        sg_id INTEGER NOT NULL,
+        PRIMARY KEY (ec2_instance_id, sg_id),
+        FOREIGN KEY(ec2_instance_id) REFERENCES instances (id) ON DELETE CASCADE,
+        FOREIGN KEY(sg_id) REFERENCES security_groups (id) ON DELETE CASCADE
+);
+CREATE TABLE instances (
+        id INTEGER NOT NULL,
+        instance_id VARCHAR(64) NOT NULL,
+        aws_account_id INTEGER NOT NULL,
+        name VARCHAR(255),
+        instance_type VARCHAR(64),
+        state VARCHAR(32),
+        region VARCHAR(32),
+        private_ip VARCHAR(45),
+        public_ip VARCHAR(45),
+        launch_time DATETIME,
+        tags JSON,
+        ami_id_str VARCHAR(64),
+        vpc_id_str VARCHAR(64),
+        subnet_id_str VARCHAR(64),
+        PRIMARY KEY (id),
+        FOREIGN KEY(aws_account_id) REFERENCES aws_credentials (id) ON DELETE CASCADE,
+        FOREIGN KEY(subnet_id_str) REFERENCES subnets (subnet_id) ON DELETE SET NULL,
+        FOREIGN KEY(vpc_id_str) REFERENCES vpcs (vpc_id) ON DELETE SET NULL
+);
+CREATE INDEX ix_instances_ami_id_str ON instances (ami_id_str);
+CREATE UNIQUE INDEX ix_instances_instance_id ON instances (instance_id);
+CREATE INDEX ix_instances_name ON instances (name);
+CREATE INDEX ix_instances_region ON instances (region);
+CREATE INDEX ix_instances_subnet_id_str ON instances (subnet_id_str);
+CREATE INDEX ix_instances_vpc_id_str ON instances (vpc_id_str);
+CREATE TABLE route_tables (
+        id INTEGER NOT NULL,
+        route_table_id VARCHAR(64) NOT NULL,
+        aws_account_id INTEGER NOT NULL,
+        vpc_id_str VARCHAR(64),
+        region VARCHAR(32),
+        name VARCHAR(255),
+        tags JSON,
+        PRIMARY KEY (id),
+        FOREIGN KEY(aws_account_id) REFERENCES aws_credentials (id) ON DELETE CASCADE,
+        FOREIGN KEY(vpc_id_str) REFERENCES vpcs (vpc_id) ON DELETE SET NULL
+);
+CREATE INDEX ix_route_tables_name ON route_tables (name);
+CREATE INDEX ix_route_tables_region ON route_tables (region);
+CREATE UNIQUE INDEX ix_route_tables_route_table_id ON route_tables (route_table_id);
+CREATE INDEX ix_route_tables_vpc_id_str ON route_tables (vpc_id_str);
+CREATE TABLE routes (
+        id INTEGER NOT NULL,
+        route_table_id_int INTEGER NOT NULL,
+        destination_cidr VARCHAR(64),
+        target_gateway_id VARCHAR(64),
+        target_instance_id VARCHAR(64),
+        target_eni_id VARCHAR(64),
+        origin VARCHAR(64),
+        PRIMARY KEY (id),
+        FOREIGN KEY(route_table_id_int) REFERENCES route_tables (id) ON DELETE CASCADE
+);
+CREATE TABLE security_group_rules (
+        id INTEGER NOT NULL,
+        sg_id INTEGER NOT NULL,
+        rule_type VARCHAR(10),
+        protocol VARCHAR(32),
+        from_port INTEGER,
+        to_port INTEGER,
+        cidr_ipv4 VARCHAR(128),
+        source_security_group_id VARCHAR(64),
+        PRIMARY KEY (id),
+        FOREIGN KEY(sg_id) REFERENCES security_groups (id) ON DELETE CASCADE
+);
+CREATE TABLE security_groups (
+        id INTEGER NOT NULL,
+        group_id VARCHAR(64) NOT NULL,
+        aws_account_id INTEGER NOT NULL,
+        vpc_id_str VARCHAR(64),
+        region VARCHAR(32),
+        group_name VARCHAR(255),
+        description VARCHAR(1024),
+        tags JSON,
+        PRIMARY KEY (id),
+        FOREIGN KEY(aws_account_id) REFERENCES aws_credentials (id) ON DELETE CASCADE,
+        FOREIGN KEY(vpc_id_str) REFERENCES vpcs (vpc_id) ON DELETE SET NULL
+);
+CREATE UNIQUE INDEX ix_security_groups_group_id ON security_groups (group_id);
+CREATE INDEX ix_security_groups_group_name ON security_groups (group_name);
+CREATE INDEX ix_security_groups_region ON security_groups (region);
+CREATE INDEX ix_security_groups_vpc_id_str ON security_groups (vpc_id_str);
+CREATE TABLE snapshots (
+        id INTEGER NOT NULL,
+        snapshot_id VARCHAR(64) NOT NULL,
+        aws_account_id INTEGER NOT NULL,
+        region VARCHAR(32),
+        volume_id VARCHAR(64),
+        start_time DATETIME,
+        volume_size_gb INTEGER,
+        state VARCHAR(32),
+        tags JSON,
+        PRIMARY KEY (id),
+        FOREIGN KEY(aws_account_id) REFERENCES aws_credentials (id) ON DELETE CASCADE
+);
+CREATE INDEX ix_snapshots_region ON snapshots (region);
+CREATE UNIQUE INDEX ix_snapshots_snapshot_id ON snapshots (snapshot_id);
+CREATE TABLE subnets (
+        id INTEGER NOT NULL,
+        subnet_id VARCHAR(64) NOT NULL,
+        aws_account_id INTEGER NOT NULL,
+        vpc_id_str VARCHAR(64),
+        region VARCHAR(32),
+        cidr_block VARCHAR(64),
+        availability_zone VARCHAR(32),
+        name VARCHAR(255),
+        tags JSON,
+        PRIMARY KEY (id),
+        FOREIGN KEY(aws_account_id) REFERENCES aws_credentials (id) ON DELETE CASCADE,
+        FOREIGN KEY(vpc_id_str) REFERENCES vpcs (vpc_id) ON DELETE SET NULL
+);
+CREATE INDEX ix_subnets_name ON subnets (name);
+CREATE INDEX ix_subnets_region ON subnets (region);
+CREATE UNIQUE INDEX ix_subnets_subnet_id ON subnets (subnet_id);
+CREATE INDEX ix_subnets_vpc_id_str ON subnets (vpc_id_str);
+CREATE TABLE users (
+        id INTEGER NOT NULL,
+        username VARCHAR(64) NOT NULL,
+        email VARCHAR(120) NOT NULL,
+        password_hash VARCHAR(256),
+        PRIMARY KEY (id)
+);
+CREATE UNIQUE INDEX ix_users_email ON users (email);
+CREATE UNIQUE INDEX ix_users_username ON users (username);
+CREATE TABLE vpcs (
+        id INTEGER NOT NULL,
+        vpc_id VARCHAR(64) NOT NULL,
+        aws_account_id INTEGER NOT NULL,
+        region VARCHAR(32),
+        cidr_block VARCHAR(64),
+        is_default BOOLEAN,
+        name VARCHAR(255),
+        tags JSON,
+        PRIMARY KEY (id),
+        FOREIGN KEY(aws_account_id) REFERENCES aws_credentials (id) ON DELETE CASCADE
+);
+CREATE INDEX ix_vpcs_name ON vpcs (name);
+CREATE INDEX ix_vpcs_region ON vpcs (region);
+CREATE UNIQUE INDEX ix_vpcs_vpc_id ON vpcs (vpc_id);
+(venv) root@sandani:/home/sandani/aws-dashboard#
+
+
+
+---- end ----------
+
+

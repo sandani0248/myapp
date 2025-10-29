@@ -1,0 +1,120 @@
+{% extends "base_sidebar.html" %}
+
+{% block title %}Edit Backup Group - AWS Dashboard{% endblock %}
+
+{% block content %}
+<!-- Page Header -->
+<div class="mb-6">
+    <h1 class="text-3xl font-bold text-white mb-2">Edit Backup Group</h1>
+    <p class="text-slate-400">Modify backup group settings and policies</p>
+</div>
+
+<!-- Edit Group Form -->
+<div class="card bg-base-100 shadow-xl">
+    <div class="card-body">
+        <form method="POST" action="{{ url_for('dashboard.edit_backup_group', group_id=backup_group.id) }}">
+            <div class="form-control mb-4">
+                <label class="label"><span class="label-text">Group Name</span></label>
+                <input type="text" name="name" value="{{ backup_group.name }}" class="input input-bordered" required>
+            </div>
+            
+            {% if backup_group.policy %}
+            <div class="form-control mb-4">
+                <label class="label"><span class="label-text">Backup Strategy</span></label>
+                <select name="backup_strategy" class="select select-bordered">
+                    <option value="hybrid" {% if backup_group.policy.backup_strategy == 'hybrid' %}selected{% endif %}>Hybrid (AMI + Snapshots)</option>
+                    <option value="ami_only" {% if backup_group.policy.backup_strategy == 'ami_only' %}selected{% endif %}>AMI Only</option>
+                    <option value="snapshot_only" {% if backup_group.policy.backup_strategy == 'snapshot_only' %}selected{% endif %}>Snapshot Only</option>
+                </select>
+            </div>
+            
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                <div>
+                    <h4 class="font-semibold mb-2">AMI Backup Settings</h4>
+                    <div class="form-control mb-2">
+                        <label class="label"><span class="label-text">AMI Interval</span></label>
+                        <div class="flex gap-2">
+                            <input type="number" name="ami_interval_value" value="{{ backup_group.policy.ami_interval_value }}" class="input input-bordered w-24">
+                            <select name="ami_interval_unit" class="select select-bordered flex-1">
+                                <option value="hours" {% if backup_group.policy.ami_interval_unit == 'hours' %}selected{% endif %}>Hours</option>
+                                <option value="days" {% if backup_group.policy.ami_interval_unit == 'days' %}selected{% endif %}>Days</option>
+                                <option value="weeks" {% if backup_group.policy.ami_interval_unit == 'weeks' %}selected{% endif %}>Weeks</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                
+                <div>
+                    <h4 class="font-semibold mb-2">Snapshot Backup Settings</h4>
+                    <div class="form-control mb-2">
+                        <label class="label"><span class="label-text">Snapshot Interval</span></label>
+                        <div class="flex gap-2">
+                            <input type="number" name="snapshot_interval_value" value="{{ backup_group.policy.snapshot_interval_value }}" class="input input-bordered w-24">
+                            <select name="snapshot_interval_unit" class="select select-bordered flex-1">
+                                <option value="minutes" {% if backup_group.policy.snapshot_interval_unit == 'minutes' %}selected{% endif %}>Minutes</option>
+                                <option value="hours" {% if backup_group.policy.snapshot_interval_unit == 'hours' %}selected{% endif %}>Hours</option>
+                                <option value="days" {% if backup_group.policy.snapshot_interval_unit == 'days' %}selected{% endif %}>Days</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="form-control mb-4">
+                <label class="label"><span class="label-text">Retention Policy</span></label>
+                <div class="flex gap-2">
+                    <select name="retention_type" class="select select-bordered">
+                        <option value="days" {% if backup_group.policy.retention_days %}selected{% endif %}>Keep for days</option>
+                        <option value="count" {% if backup_group.policy.retention_count %}selected{% endif %}>Keep number of backups</option>
+                    </select>
+                    <input type="number" name="retention_days" value="{{ backup_group.policy.retention_days or 7 }}" class="input input-bordered w-24">
+                    <input type="number" name="retention_count" value="{{ backup_group.policy.retention_count or 10 }}" class="input input-bordered w-24">
+                </div>
+            </div>
+            
+            <div class="form-control mb-4">
+                <label class="cursor-pointer label">
+                    <span class="label-text">Enable Schedule</span>
+                    <input type="checkbox" name="is_active" {% if backup_group.policy.is_active %}checked{% endif %} class="toggle toggle-primary" />
+                </label>
+            </div>
+            {% endif %}
+            
+            <div class="card-actions justify-end">
+                <a href="{{ url_for('dashboard.backup_groups') }}" class="btn">Cancel</a>
+                <button type="submit" class="btn btn-primary">Update Group</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Instance List -->
+<div class="card bg-base-100 shadow-xl mt-6">
+    <div class="card-body">
+        <h3 class="card-title">Instances in this group</h3>
+        <div class="overflow-x-auto">
+            <table class="table table-zebra">
+                <thead>
+                    <tr>
+                        <th>Instance ID</th>
+                        <th>Name</th>
+                        <th>Region</th>
+                        <th>State</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for instance in backup_group.instances %}
+                    <tr>
+                        <td><code>{{ instance.instance_id }}</code></td>
+                        <td>{{ instance.name or 'Unnamed' }}</td>
+                        <td>{{ instance.region }}</td>
+                        <td><span class="badge badge-sm">{{ instance.state }}</span></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+{% endblock %}

@@ -1,0 +1,433 @@
+{% extends "base_sidebar.html" %}
+
+{% block title %}Dashboard - AWS Management{% endblock %}
+
+{% block content %}
+<!-- Stats Cards Grid -->
+<div class="stats-grid">
+    <!-- EC2 Instances Card -->
+    <div class="stat-card">
+        <div class="stat-header">
+            <div>
+                <div class="stat-label">EC2 Instances</div>
+                <div class="stat-value">{{ stats.instance_count | default('0') }}</div>
+            </div>
+            <div class="stat-icon blue">
+                <i class="fas fa-server"></i>
+            </div>
+        </div>
+        <div class="stat-trend up">
+            <i class="fas fa-arrow-up"></i> Active resources
+        </div>
+    </div>
+    
+    <!-- Backups Card -->
+    <div class="stat-card">
+        <div class="stat-header">
+            <div>
+                <div class="stat-label">Total Snapshots</div>
+                <div class="stat-value">{{ stats.snapshot_count | default('0') }}</div>
+            </div>
+            <div class="stat-icon green">
+                <i class="fas fa-database"></i>
+            </div>
+        </div>
+        <div class="stat-trend up">
+            <i class="fas fa-check-circle"></i> Available backups
+        </div>
+    </div>
+    
+    <!-- AMIs Card -->
+    <div class="stat-card">
+        <div class="stat-header">
+            <div>
+                <div class="stat-label">AMIs</div>
+                <div class="stat-value">{{ stats.ami_count | default('0') }}</div>
+            </div>
+            <div class="stat-icon orange">
+                <i class="fas fa-compact-disc"></i>
+            </div>
+        </div>
+        <div class="stat-trend">
+            <i class="fas fa-image"></i> Machine images
+        </div>
+    </div>
+</div>
+
+<!-- Charts Row -->
+<div class="chart-grid">
+    <!-- Resource Distribution Chart -->
+    <div class="chart-card">
+        <div class="chart-header">
+            <i class="fas fa-chart-pie"></i>
+            Resource Distribution
+        </div>
+        <canvas id="resourceChart" height="120"></canvas>
+    </div>
+    
+    <!-- Regional Distribution Chart -->
+    <div class="chart-card">
+        <div class="chart-header">
+            <i class="fas fa-chart-bar"></i>
+            Resources Overview
+        </div>
+        <canvas id="overviewChart" height="120"></canvas>
+    </div>
+</div>
+
+<!-- Recent Activity Timeline -->
+<div class="activity-card">
+    <div class="chart-header" style="margin-bottom: 16px;">
+        <i class="fas fa-clock"></i>
+        Recent Activity
+    </div>
+    
+    <div class="timeline">
+        {% if aws_accounts %}
+        <div class="timeline-item">
+            <div class="timeline-dot success"></div>
+            <div class="timeline-content">
+                <div class="timeline-text">AWS Dashboard initialized with <strong>{{ aws_accounts|length }} account(s)</strong></div>
+                <div class="timeline-time">Active</div>
+            </div>
+        </div>
+        
+        {% if stats.instance_count > 0 %}
+        <div class="timeline-item">
+            <div class="timeline-dot info"></div>
+            <div class="timeline-content">
+                <div class="timeline-text">Monitoring <strong>{{ stats.instance_count }} EC2 instance(s)</strong></div>
+                <div class="timeline-time">Current inventory</div>
+            </div>
+        </div>
+        {% endif %}
+        
+        {% if stats.snapshot_count > 0 %}
+        <div class="timeline-item">
+            <div class="timeline-dot success"></div>
+            <div class="timeline-content">
+                <div class="timeline-text"><strong>{{ stats.snapshot_count }} snapshot(s)</strong> available for restore</div>
+                <div class="timeline-time">Backup inventory</div>
+            </div>
+        </div>
+        {% endif %}
+        
+        {% if stats.sg_count > 0 %}
+        <div class="timeline-item">
+            <div class="timeline-dot info"></div>
+            <div class="timeline-content">
+                <div class="timeline-text"><strong>{{ stats.sg_count }} security group(s)</strong> configured</div>
+                <div class="timeline-time">Security status</div>
+            </div>
+        </div>
+        {% endif %}
+        {% else %}
+        <div class="timeline-item">
+            <div class="timeline-dot error"></div>
+            <div class="timeline-content">
+                <div class="timeline-text">No AWS accounts configured yet</div>
+                <div class="timeline-time">Add an account to get started</div>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Quick Actions Section -->
+<div class="card bg-base-300 shadow-xl">
+    <div class="card-body">
+        <h2 class="card-title">
+            <i class="fas fa-bolt"></i>
+            Quick Actions
+        </h2>
+        <div class="flex flex-wrap gap-3 mt-4">
+            {% if aws_accounts %}
+            <button class="btn btn-primary gap-2" onclick="showSyncModal()">
+                <i class="fas fa-sync-alt"></i>
+                Sync Inventory
+            </button>
+            <button class="btn btn-success gap-2" onclick="showBackupModal()">
+                <i class="fas fa-database"></i>
+                Create Backup
+            </button>
+            <a href="{{ url_for('dashboard.ec2_page') }}" class="btn btn-accent gap-2">
+                <i class="fas fa-server"></i>
+                View EC2 Instances
+            </a>
+            <a href="{{ url_for('dashboard.backup_groups') }}" class="btn btn-info gap-2">
+                <i class="fas fa-layer-group"></i>
+                Backup Groups
+            </a>
+            {% else %}
+            <button class="btn btn-primary gap-2" onclick="add_account_modal.showModal()">
+                <i class="fas fa-plus"></i>
+                Add Your First AWS Account
+            </button>
+            <div class="alert alert-info">
+                <i class="fas fa-info-circle"></i>
+                <span>Add an AWS account to start managing your cloud resources</span>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+
+<script>
+// Safe chart data with error handling
+const stats = {
+    instances: {{ stats.instance_count | default(0) | int | safe }},
+    snapshots: {{ stats.snapshot_count | default(0) | int | safe }},
+    vpcs: {{ stats.vpc_count | default(0) | int | safe }},
+    securityGroups: {{ stats.sg_count | default(0) | int | safe }},
+    amis: {{ stats.ami_count | default(0) | int | safe }},
+    subnets: {{ stats.subnet_count | default(0) | int | safe }}
+};
+
+// Pass server-side data to JavaScript
+const hasAccounts = "{{ 'true' if aws_accounts else 'false' }}" === "true";
+
+// Resource Distribution Donut Chart - Only EC2, Snapshots, AMIs
+const resourceCtx = document.getElementById('resourceChart');
+if (resourceCtx) {
+    const total = stats.instances + stats.snapshots + stats.amis;
+    
+    if (total > 0) {
+        new Chart(resourceCtx, {
+            type: 'doughnut',
+            data: {
+                labels: ['EC2 Instances', 'Snapshots', 'AMIs'],
+                datasets: [{
+                    data: [stats.instances, stats.snapshots, stats.amis],
+                    backgroundColor: [
+                        '#3b82f6', // blue
+                        '#10b981', // green
+                        '#f59e0b'  // orange
+                    ],
+                    borderWidth: 0
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true,
+                plugins: {
+                    legend: {
+                        position: 'bottom',
+                        labels: {
+                            color: '#94a3b8',
+                            padding: 15,
+                            font: { size: 12 }
+                        }
+                    }
+                }
+            }
+        });
+    } else {
+        resourceCtx.parentElement.innerHTML = `
+            <div class="text-center py-8 text-slate-400">
+                <i class="fas fa-chart-pie text-4xl mb-2"></i>
+                <p>No resources to display</p>
+                <p class="text-xs">Add AWS accounts and sync to see data</p>
+            </div>`;
+    }
+}
+
+// Resources Overview Bar Chart - Only EC2, Snapshots, AMIs
+const overviewCtx = document.getElementById('overviewChart');
+if (overviewCtx) {
+    const hasData = stats.instances > 0 || stats.snapshots > 0 || stats.amis > 0;
+    
+    if (hasData) {
+        new Chart(overviewCtx, {
+            type: 'bar',
+            data: {
+                labels: ['EC2 Instances', 'Snapshots', 'AMIs'],
+                datasets: [{
+                    label: 'Resource Count',
+                    data: [stats.instances, stats.snapshots, stats.amis],
+                    backgroundColor: [
+                        '#3b82f6',
+                        '#10b981',
+                        '#f59e0b'
+                    ],
+                    borderRadius: 8
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true,
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        ticks: { 
+                            color: '#94a3b8',
+                            stepSize: 1
+                        },
+                        grid: { color: '#334155' }
+                    },
+                    x: {
+                        ticks: { color: '#94a3b8' },
+                        grid: { display: false }
+                    }
+                },
+                plugins: {
+                    legend: { display: false }
+                }
+            }
+        });
+    } else {
+        overviewCtx.parentElement.innerHTML = `
+            <div class="text-center py-8 text-slate-400">
+                <i class="fas fa-chart-bar text-4xl mb-2"></i>
+                <p>No resources to display</p>
+                <p class="text-xs">Add AWS accounts and sync to see data</p>
+            </div>`;
+    }
+}
+
+// Quick Actions with account validation
+function showSyncModal() {
+    const accountSelect = document.getElementById('account_id_select');
+    if (accountSelect && accountSelect.options.length > 1) {
+        window.location.href = '{{ url_for("dashboard.index") }}';
+    } else {
+        alert('Please add an AWS account first');
+    }
+}
+
+function showBackupModal() {
+    if (hasAccounts) {
+        window.location.href = '{{ url_for("dashboard.backup_groups") }}';
+    } else {
+        alert('Please add an AWS account first');
+    }
+}
+</script>
+
+<!-- <script>
+// Safe chart data with error handling
+const stats = {
+    instances: {{ stats.instance_count | default(0) | int }},
+    snapshots: {{ stats.snapshot_count | default(0) | int }},
+    vpcs: {{ stats.vpc_count | default(0) | int }},
+    securityGroups: {{ stats.sg_count | default(0) | int }},
+    amis: {{ stats.ami_count | default(0) | int }},
+    subnets: {{ stats.subnet_count | default(0) | int }}
+};
+
+// Pass server-side data to JavaScript
+const hasAccounts = {{ 'true' if aws_accounts else 'false' }};
+
+// Resource Distribution Donut Chart - Only EC2, Snapshots, AMIs
+const resourceCtx = document.getElementById('resourceChart');
+if (resourceCtx) {
+    const total = stats.instances + stats.snapshots + stats.amis;
+    
+    if (total > 0) {
+        new Chart(resourceCtx, {
+            type: 'doughnut',
+            data: {
+                labels: ['EC2 Instances', 'Snapshots', 'AMIs'],
+                datasets: [{
+                    data: [stats.instances, stats.snapshots, stats.amis],
+                    backgroundColor: [
+                        '#3b82f6', // blue
+                        '#10b981', // green
+                        '#f59e0b'  // orange
+                    ],
+                    borderWidth: 0
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true,
+                plugins: {
+                    legend: {
+                        position: 'bottom',
+                        labels: {
+                            color: '#94a3b8',
+                            padding: 15,
+                            font: { size: 12 }
+                        }
+                    }
+                }
+            }
+        });
+    } else {
+        resourceCtx.parentElement.innerHTML = '<div class="text-center py-8 text-slate-400"><i class="fas fa-chart-pie text-4xl mb-2"></i><p>No resources to display</p><p class="text-xs">Add AWS accounts and sync to see data</p></div>';
+    }
+}
+
+// Resources Overview Bar Chart - Only EC2, Snapshots, AMIs
+const overviewCtx = document.getElementById('overviewChart');
+if (overviewCtx) {
+    const hasData = stats.instances > 0 || stats.snapshots > 0 || stats.amis > 0;
+    
+    if (hasData) {
+        new Chart(overviewCtx, {
+            type: 'bar',
+            data: {
+                labels: ['EC2 Instances', 'Snapshots', 'AMIs'],
+                datasets: [{
+                    label: 'Resource Count',
+                    data: [stats.instances, stats.snapshots, stats.amis],
+                    backgroundColor: [
+                        '#3b82f6',
+                        '#10b981',
+                        '#f59e0b'
+                    ],
+                    borderRadius: 8
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true,
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        ticks: { 
+                            color: '#94a3b8',
+                            stepSize: 1
+                        },
+                        grid: { color: '#334155' }
+                    },
+                    x: {
+                        ticks: { color: '#94a3b8' },
+                        grid: { display: false }
+                    }
+                },
+                plugins: {
+                    legend: {
+                        display: false
+                    }
+                }
+            }
+        });
+    } else {
+        overviewCtx.parentElement.innerHTML = '<div class="text-center py-8 text-slate-400"><i class="fas fa-chart-bar text-4xl mb-2"></i><p>No resources to display</p><p class="text-xs">Add AWS accounts and sync to see data</p></div>';
+    }
+}
+
+// Quick Actions with account validation
+function showSyncModal() {
+    const accountSelect = document.getElementById('account_id_select');
+    if (accountSelect && accountSelect.options.length > 1) {
+        // Scroll to sync section on main page
+        window.location.href = '{{ url_for("dashboard.index") }}';
+    } else {
+        alert('Please add an AWS account first');
+    }
+}
+
+function showBackupModal() {
+    if (hasAccounts) {
+        window.location.href = '{{ url_for("dashboard.backup_groups") }}';
+    } else {
+        alert('Please add an AWS account first');
+    }
+}
+</script> -->
+{% endblock %}

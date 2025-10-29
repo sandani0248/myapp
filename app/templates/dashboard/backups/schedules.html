@@ -1,0 +1,296 @@
+{% extends "base_sidebar.html" %}
+
+{% block title %}Backup Schedules - AWS Dashboard{% endblock %}
+
+{% block content %}
+<!-- Page Header -->
+<div class="mb-6">
+    <h1 class="text-3xl font-bold text-white mb-2">Backup Schedules</h1>
+    <p class="text-slate-400">View and manage hybrid backup schedules</p>
+</div>
+
+<!-- Schedules DataTable -->
+<div class="dataTables_wrapper">
+    <div class="mb-4 flex justify-between items-center">
+        <h2 class="text-xl font-semibold text-white">
+            <i class="fas fa-calendar-alt"></i> Active Schedules
+        </h2>
+        <div class="flex gap-2">
+            <button class="btn btn-sm btn-outline gap-2" onclick="refreshTable()">
+                <i class="fas fa-sync-alt"></i>
+                Refresh
+            </button>
+        </div>
+    </div>
+    
+    <table id="schedulesTable" class="table table-zebra w-full" style="width:100%">
+        <thead>
+            <tr>
+                <th>Group Name</th>
+                <th>Strategy</th>
+                <th>AMI Schedule</th>
+                <th>Snapshot Schedule</th>
+                <th>Retention</th>
+                <th>Status</th>
+                <th>Last AMI</th>
+                <th>Last Snapshot</th>
+                <th>Next AMI</th>
+                <th>Next Snapshot</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for policy in backup_policies %}
+            <tr>
+                <td><strong>{% if policy.group %}{{ policy.group.name }}{% else %}Unknown Group{% endif %}</strong></td>
+                <td>
+                    {% if policy.backup_strategy == 'hybrid' %}
+                    <span class="badge badge-info badge-sm">Hybrid</span>
+                    {% elif policy.backup_strategy == 'ami_only' %}
+                    <span class="badge badge-primary badge-sm">AMI Only</span>
+                    {% elif policy.backup_strategy == 'snapshot_only' %}
+                    <span class="badge badge-warning badge-sm">Snapshot Only</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if policy.backup_strategy != 'snapshot_only' %}
+                    <span class="badge badge-sm badge-outline">Every {{ policy.ami_interval_value }} {{ policy.ami_interval_unit }}</span>
+                    {% else %}
+                    <span class="badge badge-sm badge-ghost">Disabled</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if policy.backup_strategy != 'ami_only' %}
+                    <span class="badge badge-sm badge-outline">Every {{ policy.snapshot_interval_value }} {{ policy.snapshot_interval_unit }}</span>
+                    {% else %}
+                    <span class="badge badge-sm badge-ghost">Disabled</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if policy.retention_days %}
+                    {{ policy.retention_days }} days
+                    {% elif policy.retention_count %}
+                    Last {{ policy.retention_count }} backups
+                    {% else %}
+                    Default
+                    {% endif %}
+                </td>
+                <td>
+                    {% if policy.is_active %}
+                    <span class="badge badge-success badge-sm">Enabled</span>
+                    {% else %}
+                    <span class="badge badge-warning badge-sm">Paused</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if policy.last_ami_time %}
+                    {{ policy.last_ami_time|timeago }}
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
+                <td>
+                    {% if policy.last_snapshot_time %}
+                    {{ policy.last_snapshot_time|timeago }}
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
+                <td>
+                    {% if policy.is_active and policy.backup_strategy != 'snapshot_only' %}
+                    {{ calculate_next_run(policy.last_ami_time, policy.ami_interval_value, policy.ami_interval_unit) }}
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
+                <td>
+                    {% if policy.is_active and policy.backup_strategy != 'ami_only' %}
+                    {{ calculate_next_run(policy.last_snapshot_time, policy.snapshot_interval_value, policy.snapshot_interval_unit) }}
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
+                <td>
+                    <div class="flex gap-1">
+                        <a href="{{ url_for('dashboard.edit_backup_group', group_id=policy.group_id) }}" class="btn btn-xs btn-ghost" title="Edit"><i class="fas fa-edit"></i></a>
+                        
+                        {% if policy.is_active %}
+                        <a href="{{ url_for('dashboard.pause_backup_schedule', policy_id=policy.id) }}" class="btn btn-xs btn-warning" title="Pause"><i class="fas fa-pause"></i></a>
+                        {% else %}
+                        <a href="{{ url_for('dashboard.resume_backup_schedule', policy_id=policy.id) }}" class="btn btn-xs btn-success" title="Resume"><i class="fas fa-play"></i></a>
+                        {% endif %}
+
+                        <button class="btn btn-xs btn-primary" 
+                            onclick="runNowModal('{{ policy.id }}', '{% if policy.group %}{{ policy.group.name }}{% else %}Unknown Group{% endif %}')" 
+                            title="Run Now" 
+                            data-policy-id="{{ policy.id }}" 
+                            data-group-id="{% if policy.group %}{{ policy.group.id }}{% else %}0{% endif %}">
+                            <i class="fas fa-bolt"></i>
+                        </button>
+                        
+                        <!-- <button class="btn btn-xs btn-primary" onclick="runNowModal({{ policy.id }}, '{{ policy.group.name }}')" title="Run Now"><i class="fas fa-bolt"></i></button> -->
+                    </div>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- Schedule Statistics -->
+<div class="grid grid-cols-1 md:grid-cols-4 gap-6 mt-6">
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body">
+            <h3 class="card-title text-sm">
+                <i class="fas fa-check-circle text-success"></i>
+                Active Schedules
+            </h3>
+            <div class="text-3xl font-bold">{{ stats.active_count }}</div>
+            <p class="text-xs text-slate-400">Automatically running backups</p>
+        </div>
+    </div>
+    
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body">
+            <h3 class="card-title text-sm">
+                <i class="fas fa-pause-circle text-warning"></i>
+                Paused Schedules
+            </h3>
+            <div class="text-3xl font-bold">{{ stats.paused_count }}</div>
+            <p class="text-xs text-slate-400">Temporarily disabled</p>
+        </div>
+    </div>
+    
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body">
+            <h3 class="card-title text-sm">
+                <i class="fas fa-database text-primary"></i>
+                AMIs Today
+            </h3>
+            <div class="text-3xl font-bold">{{ stats.ami_today_count }}</div>
+            <p class="text-xs text-slate-400">Full system backups</p>
+        </div>
+    </div>
+    
+    <div class="card bg-base-100 shadow-xl">
+        <div class="card-body">
+            <h3 class="card-title text-sm">
+                <i class="fas fa-hdd text-accent"></i>
+                Snapshots Today
+            </h3>
+            <div class="text-3xl font-bold">{{ stats.snapshot_today_count }}</div>
+            <p class="text-xs text-slate-400">Incremental backups</p>
+        </div>
+    </div>
+</div>
+
+<!-- Run Now Modal -->
+<!-- <dialog id="run_now_modal" class="modal">
+    <div class="modal-box">
+        <h3 class="font-bold text-lg mb-4">Run Backup Now</h3>
+            <form id="runNowForm" method="POST" action="{{ url_for('dashboard.run_backup_now', group_id=0) }}">
+                <!-- The form JS should dynamically update the action URL with the correct group_id 
+                <input type="hidden" id="policy_id" name="policy_id" value="">
+                <!-- rest of form 
+            <p class="mb-4">Run an immediate backup for <strong id="group_name"></strong>?</p>
+            
+            <div class="form-control mb-4">
+                <label class="label"><span class="label-text">Backup Type</span></label>
+                <select name="backup_type" class="select select-bordered">
+                    <option value="ami">Full AMI Backup</option>
+                    <option value="snapshot">Snapshot Backup</option>
+                </select>
+            </div>
+            
+            <div class="modal-action">
+                <button type="button" class="btn" onclick="run_now_modal.close()">Cancel</button>
+                <button type="submit" class="btn btn-primary">Run Now</button>
+            </div>
+        </form>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog> -->
+
+<!-- Replace the run_now_modal in schedules.html -->
+<dialog id="run_now_modal" class="modal">
+    <div class="modal-box">
+        <h3 class="font-bold text-lg mb-4">Run Backup Now</h3>
+        <form id="runNowForm" method="POST" action="{{ url_for('dashboard.run_backup_now', group_id=0) }}">
+            <input type="hidden" id="policy_id" name="policy_id" value="">
+            
+            <p class="mb-4">Run an immediate backup for <strong id="group_name"></strong>?</p>
+            
+            <div class="form-control mb-4">
+                <label class="label"><span class="label-text">Backup Type</span></label>
+                <select name="backup_type" class="select select-bordered">
+                    <option value="ami">Full AMI Backup</option>
+                    <option value="snapshot">Snapshot Backup</option>
+                </select>
+            </div>
+            
+            <div class="modal-action">
+                <button type="button" class="btn" onclick="run_now_modal.close()">Cancel</button>
+                <button type="submit" class="btn btn-primary">Run Now</button>
+            </div>
+        </form>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+
+<!-- Explanation Alert -->
+<div class="alert alert-info mt-6 shadow-lg">
+    <i class="fas fa-info-circle"></i>
+    <div>
+        <h3 class="font-bold">Hybrid Backup System</h3>
+        <div class="text-xs">Our hybrid backup system creates full AMI backups on a scheduled basis with incremental snapshots in between. This provides both comprehensive system recovery and frequent point-in-time restores while optimizing storage costs.</div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let schedulesTable;
+
+$(document).ready(function() {
+    // Initialize DataTable
+    schedulesTable = $('#schedulesTable').DataTable({
+        order: [[0, 'asc']], // Sort by group name
+        pageLength: 25
+    });
+});
+
+function refreshTable() {
+    location.reload();
+}
+
+function runNowModal(policyId, groupName) {
+    // Set values in the modal
+    document.getElementById('policy_id').value = policyId;
+    document.getElementById('group_name').textContent = groupName;
+    
+    // Get the button element that was clicked
+    const button = document.querySelector(`[data-policy-id="${policyId}"]`);
+    if (button) {
+        const groupId = button.getAttribute('data-group-id');
+        // Update the form action with the correct group ID
+        const form = document.getElementById('runNowForm');
+        const currentAction = form.action;
+        const newAction = currentAction.replace(/\/\d+$/, '/' + groupId);
+        form.action = newAction;
+    }
+    
+    // Show the modal
+    run_now_modal.showModal();
+}
+
+// This is the function needed by groups.html
+function showRunNowModal(groupId, groupName) {
+    document.getElementById('group_name').textContent = groupName;
+    const form = document.getElementById('runNowForm');
+    // Update the form action with the correct group ID
+    form.action = form.action.replace(/\/\d+$/, '/' + groupId);
+    run_now_modal.showModal();
+}
+</script>
+{% endblock %}

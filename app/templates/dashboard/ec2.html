@@ -1,0 +1,338 @@
+{% extends "base_sidebar.html" %}
+
+{% block title %}EC2 Instances - AWS Dashboard{% endblock %}
+
+{% block content %}
+<!-- Page Header -->
+<div class="mb-6">
+    <h1 class="text-3xl font-bold text-white mb-2">EC2 Instances</h1>
+    <p class="text-slate-400">Manage and monitor your EC2 instances across all regions</p>
+</div>
+
+<!-- Filters and Actions Bar -->
+<div class="card bg-base-100 shadow-xl mb-6">
+    <div class="card-body">
+        <div class="flex flex-wrap gap-4 items-end">
+            <!-- Account Filter -->
+            <div class="form-control flex-1 min-w-[200px]">
+                <label class="label">
+                    <span class="label-text">AWS Account</span>
+                </label>
+                <select id="filter_account" class="select select-bordered">
+                    <option value="">All Accounts</option>
+                    {% for account in aws_accounts %}
+                    <option value="{{ account.id }}">{{ account.account_name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            
+            <!-- Region Filter -->
+            <div class="form-control flex-1 min-w-[200px]">
+                <label class="label">
+                    <span class="label-text">Region</span>
+                </label>
+                <select id="filter_region" class="select select-bordered">
+                    <option value="">All Regions</option>
+                    <option value="us-east-1">US East (N. Virginia)</option>
+                    <option value="us-west-2">US West (Oregon)</option>
+                    <option value="eu-west-1">EU (Ireland)</option>
+                    <option value="ap-south-1">Asia Pacific (Mumbai)</option>
+                </select>
+            </div>
+            
+            <!-- State Filter -->
+            <div class="form-control flex-1 min-w-[200px]">
+                <label class="label">
+                    <span class="label-text">State</span>
+                </label>
+                <select id="filter_state" class="select select-bordered">
+                    <option value="">All States</option>
+                    <option value="running">Running</option>
+                    <option value="stopped">Stopped</option>
+                    <option value="terminated">Terminated</option>
+                </select>
+            </div>
+            
+            <!-- Apply Filters Button -->
+            <div class="form-control">
+                <button class="btn btn-primary gap-2" onclick="applyFilters()">
+                    <i class="fas fa-filter"></i>
+                    Apply Filters
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Instance Stats Mini Bar -->
+<div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+    <div class="stat bg-base-100 rounded-lg border border-base-300">
+        <div class="stat-figure text-success">
+            <i class="fas fa-play-circle text-2xl"></i>
+        </div>
+        <div class="stat-title">Running</div>
+        <div class="stat-value text-success text-2xl" id="running-count">{{ stats.running_count }}</div>
+    </div>
+    
+    <div class="stat bg-base-100 rounded-lg border border-base-300">
+        <div class="stat-figure text-warning">
+            <i class="fas fa-stop-circle text-2xl"></i>
+        </div>
+        <div class="stat-title">Stopped</div>
+        <div class="stat-value text-warning text-2xl" id="stopped-count">{{ stats.stopped_count }}</div>
+    </div>
+    
+    <div class="stat bg-base-100 rounded-lg border border-base-300">
+        <div class="stat-figure text-error">
+            <i class="fas fa-times-circle text-2xl"></i>
+        </div>
+        <div class="stat-title">Terminated</div>
+        <div class="stat-value text-error text-2xl" id="terminated-count">{{ stats.terminated_count }}</div>
+    </div>
+    
+    <div class="stat bg-base-100 rounded-lg border border-base-300">
+        <div class="stat-figure text-info">
+            <i class="fas fa-server text-2xl"></i>
+        </div>
+        <div class="stat-title">Total</div>
+        <div class="stat-value text-info text-2xl" id="total-count">{{ stats.instance_count }}</div>
+    </div>
+</div>
+
+<!-- Instances DataTable -->
+<div class="dataTables_wrapper">
+    <div class="mb-4 flex justify-between items-center">
+        <h2 class="text-xl font-semibold text-white">
+            <i class="fas fa-list"></i> Instance List
+        </h2>
+        <div class="flex gap-2">
+            <button class="btn btn-sm btn-outline gap-2" onclick="refreshTable()">
+                <i class="fas fa-sync-alt"></i>
+                Refresh
+            </button>
+            <button class="btn btn-sm btn-success gap-2" disabled>
+                <i class="fas fa-play"></i>
+                Start Selected
+            </button>
+            <button class="btn btn-sm btn-warning gap-2" disabled>
+                <i class="fas fa-stop"></i>
+                Stop Selected
+            </button>
+        </div>
+    </div>
+    
+    <table id="instancesTable" class="table table-zebra w-full" style="width:100%">
+        <thead>
+            <tr>
+                <th>
+                    <input type="checkbox" class="checkbox checkbox-sm" id="select-all">
+                </th>
+                <th></th>
+                <th>Name</th>
+                <th>Instance ID</th>
+                <th>State</th>
+                <th>Type</th>
+                <th>Region</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            <!-- Data loaded via AJAX -->
+        </tbody>
+    </table>
+</div>
+
+<!-- Bulk Actions Info -->
+<div class="alert alert-info mt-6 shadow-lg">
+    <i class="fas fa-info-circle"></i>
+    <div>
+        <h3 class="font-bold">Bulk Actions</h3>
+        <div class="text-xs">Select multiple instances using checkboxes to perform bulk operations like Start, Stop, or Backup.</div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let instancesTable;
+
+$(document).ready(function() {
+    // Initialize DataTable with client-side processing
+    instancesTable = $('#instancesTable').DataTable({
+        processing: true,
+        serverSide: false,
+        ajax: {
+            url: '{{ url_for("dashboard.get_instances") }}',
+            type: 'GET',
+            dataSrc: 'data'
+        },
+        columns: [
+            {
+                data: null,
+                orderable: false,
+                render: function(data, type, row) {
+                    return '<input type="checkbox" class="checkbox checkbox-sm instance-checkbox" data-id="' + row.id + '">';
+                }
+            },
+            {
+                className: 'dt-control',
+                orderable: false,
+                data: null,
+                defaultContent: '<i class="fas fa-plus-circle text-primary cursor-pointer"></i>'
+            },
+            { 
+                data: 'name',
+                render: function(data, type, row) {
+                    return data || '<span class="text-slate-500 italic">No Name</span>';
+                }
+            },
+            {
+                data: 'instance_id',
+                render: function(data, type, row) {
+                    const consoleUrl = 'https://console.aws.amazon.com/ec2/v2/home?region=' + row.region + '#Instances:instanceId=' + data;
+                    return '<a href="' + consoleUrl + '" target="_blank" class="link link-primary">' + data + '</a>';
+                }
+            },
+            {
+                data: 'state',
+                render: function(data, type, row) {
+                    const stateColors = {
+                        'running': 'success',
+                        'stopped': 'warning',
+                        'terminated': 'error',
+                        'pending': 'info'
+                    };
+                    const color = stateColors[data] || 'ghost';
+                    return '<span class="badge badge-' + color + ' badge-sm">' + data + '</span>';
+                }
+            },
+            { data: 'instance_type' },
+            { data: 'region' },
+            {
+                data: null,
+                orderable: false,
+                render: function(data, type, row) {
+                    let actions = '<div class="flex gap-1">';
+                    if (row.state === 'stopped') {
+                        actions += '<button class="btn btn-xs btn-success gap-1" onclick="startInstance(\'' + row.instance_id + '\')"><i class="fas fa-play"></i></button>';
+                    } else if (row.state === 'running') {
+                        actions += '<button class="btn btn-xs btn-warning gap-1" onclick="stopInstance(\'' + row.instance_id + '\')"><i class="fas fa-stop"></i></button>';
+                    }
+                    actions += '<button class="btn btn-xs btn-primary gap-1" onclick="backupInstance(\'' + row.instance_id + '\')"><i class="fas fa-database"></i></button>';
+                    actions += '<div class="dropdown dropdown-end"><button class="btn btn-xs btn-ghost"><i class="fas fa-ellipsis-v"></i></button><ul class="dropdown-content menu p-2 shadow bg-base-200 rounded-box w-40 text-xs"><li><a><i class="fas fa-terminal"></i> Connect</a></li><li><a><i class="fas fa-info-circle"></i> Details</a></li></ul></div>';
+                    actions += '</div>';
+                    return actions;
+                }
+            }
+        ],
+        pageLength: 25,
+        order: [[3, 'asc']],
+        language: {
+            emptyTable: "No EC2 instances found. Add an AWS account and sync to see instances.",
+            processing: '<span class="loading loading-spinner loading-lg"></span>'
+        }
+    });
+    
+    // Row expand/collapse for details
+    $('#instancesTable tbody').on('click', 'td.dt-control', function() {
+        var tr = $(this).closest('tr');
+        var row = instancesTable.row(tr);
+        
+        if (row.child.isShown()) {
+            row.child.hide();
+            $(this).find('i').removeClass('fa-minus-circle').addClass('fa-plus-circle');
+        } else {
+            row.child(formatDetails(row.data())).show();
+            $(this).find('i').removeClass('fa-plus-circle').addClass('fa-minus-circle');
+        }
+    });
+    
+    // Select all checkbox
+    $('#select-all').on('change', function() {
+        $('.instance-checkbox').prop('checked', this.checked);
+        updateBulkActionButtons();
+    });
+    
+    // Individual checkbox
+    $(document).on('change', '.instance-checkbox', function() {
+        updateBulkActionButtons();
+    });
+});
+
+// Format expandable row details
+function formatDetails(d) {
+    return `
+        <div class="bg-base-200 p-4 rounded-lg grid grid-cols-2 gap-4">
+            <div><strong>Private IP:</strong> ${d.private_ip || 'N/A'}</div>
+            <div><strong>Public IP:</strong> ${d.public_ip || 'N/A'}</div>
+            <div><strong>AMI ID:</strong> ${d.ami_id || 'N/A'}</div>
+            <div><strong>VPC ID:</strong> ${d.vpc_id || 'N/A'}</div>
+            <div><strong>Subnet ID:</strong> ${d.subnet_id || 'N/A'}</div>
+            <div><strong>Launch Time:</strong> ${d.launch_time || 'N/A'}</div>
+        </div>
+    `;
+}
+
+// Apply filters
+function applyFilters() {
+    instancesTable.ajax.reload();
+}
+
+// Refresh table
+function refreshTable() {
+    instancesTable.ajax.reload();
+}
+
+// Update bulk action button states
+function updateBulkActionButtons() {
+    const checkedCount = $('.instance-checkbox:checked').length;
+    $('button:contains("Start Selected"), button:contains("Stop Selected")').prop('disabled', checkedCount === 0);
+}
+
+// Instance actions
+function startInstance(instanceId) {
+    if (confirm('Start instance ' + instanceId + '?')) {
+        $.post('/dashboard/api/instance/' + instanceId + '/start', function(data) {
+            if (data.success) {
+                alert(data.message);
+                setTimeout(() => instancesTable.ajax.reload(), 500);
+            } else {
+                alert('Error: ' + data.message);
+            }
+        }).fail(function(xhr) {
+            alert('Error: ' + (xhr.responseJSON?.message || xhr.statusText || 'Failed to start instance'));
+        });
+    }
+}
+
+function stopInstance(instanceId) {
+    if (confirm('Stop instance ' + instanceId + '?')) {
+        $.post('/dashboard/api/instance/' + instanceId + '/stop', function(data) {
+            if (data.success) {
+                alert(data.message);
+                setTimeout(() => instancesTable.ajax.reload(), 500);
+            } else {
+                alert('Error: ' + data.message);
+            }
+        }).fail(function(xhr) {
+            alert('Error: ' + (xhr.responseJSON?.message || xhr.statusText || 'Failed to stop instance'));
+        });
+    }
+}
+
+function backupInstance(instanceId) {
+    if (confirm('Create backup of ' + instanceId + '?')) {
+        $.post('/dashboard/api/instance/' + instanceId + '/backup', function(data) {
+            if (data.success) {
+                alert(data.message);
+            } else {
+                alert('Error: ' + data.message);
+            }
+        }).fail(function(xhr) {
+            alert('Error: ' + (xhr.responseJSON?.message || xhr.statusText || 'Failed to backup instance'));
+        });
+    }
+}
+</script>
+{% endblock %}

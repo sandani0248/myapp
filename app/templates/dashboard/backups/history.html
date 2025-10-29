@@ -1,0 +1,250 @@
+{% extends "base_sidebar.html" %}
+
+{% block title %}Backup History - AWS Dashboard{% endblock %}
+
+{% block content %}
+<!-- Page Header -->
+<div class="mb-6">
+    <h1 class="text-3xl font-bold text-white mb-2">Backup History</h1>
+    <p class="text-slate-400">View all backup jobs and their status</p>
+</div>
+
+<!-- Filters Bar -->
+<div class="card bg-base-100 shadow-xl mb-6">
+    <div class="card-body">
+        <div class="flex flex-wrap gap-4 items-end">
+            <!-- Date Range Filter -->
+            <div class="form-control flex-1 min-w-[200px]">
+                <label class="label">
+                    <span class="label-text">Date Range</span>
+                </label>
+                <select id="filter_date" class="select select-bordered">
+                    <option value="today">Today</option>
+                    <option value="week" selected>Last 7 Days</option>
+                    <option value="month">Last 30 Days</option>
+                    <option value="all">All Time</option>
+                </select>
+            </div>
+            
+            <!-- Group Filter -->
+            <div class="form-control flex-1 min-w-[200px]">
+                <label class="label">
+                    <span class="label-text">Backup Group</span>
+                </label>
+                <select id="filter_group" class="select select-bordered">
+                    <option value="">All Groups</option>
+                    {% for group in backup_groups %}
+                    <option value="{{ group.id }}">{{ group.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            
+            <!-- Status Filter -->
+            <div class="form-control flex-1 min-w-[200px]">
+                <label class="label">
+                    <span class="label-text">Status</span>
+                </label>
+                <select id="filter_status" class="select select-bordered">
+                    <option value="">All Status</option>
+                    <option value="Success">Success</option>
+                    <option value="Failed">Failed</option>
+                    <option value="Pending">Pending</option>
+                </select>
+            </div>
+            
+            <!-- Apply Filters Button -->
+            <div class="form-control">
+                <button class="btn btn-primary gap-2" onclick="applyFilters()">
+                    <i class="fas fa-filter"></i>
+                    Apply
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Backup Summary Stats -->
+<div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+    <div class="stat bg-base-100 rounded-lg border border-base-300">
+        <div class="stat-figure text-success">
+            <i class="fas fa-check-circle text-2xl"></i>
+        </div>
+        <div class="stat-title">Successful</div>
+        <div class="stat-value text-success text-2xl">{{ stats.success_count }}</div>
+        <div class="stat-desc">Last 7 days</div>
+    </div>
+    
+    <div class="stat bg-base-100 rounded-lg border border-base-300">
+        <div class="stat-figure text-error">
+            <i class="fas fa-times-circle text-2xl"></i>
+        </div>
+        <div class="stat-title">Failed</div>
+        <div class="stat-value text-error text-2xl">{{ stats.failed_count }}</div>
+        <div class="stat-desc">Needs attention</div>
+    </div>
+    
+    <div class="stat bg-base-100 rounded-lg border border-base-300">
+        <div class="stat-figure text-info">
+            <i class="fas fa-spinner text-2xl"></i>
+        </div>
+        <div class="stat-title">In Progress</div>
+        <div class="stat-value text-info text-2xl">{{ stats.pending_count }}</div>
+        <div class="stat-desc">Currently running</div>
+    </div>
+    
+    <div class="stat bg-base-100 rounded-lg border border-base-300">
+        <div class="stat-figure text-primary">
+            <i class="fas fa-database text-2xl"></i>
+        </div>
+        <div class="stat-title">Total Backups</div>
+        <div class="stat-value text-primary text-2xl">{{ stats.total_count }}</div>
+        <div class="stat-desc">All time</div>
+    </div>
+</div>
+
+<!-- Backup History DataTable -->
+<div class="dataTables_wrapper">
+    <div class="mb-4 flex justify-between items-center">
+        <h2 class="text-xl font-semibold text-white">
+            <i class="fas fa-history"></i> Backup Jobs
+        </h2>
+        <div class="flex gap-2">
+            <button class="btn btn-sm btn-outline gap-2" onclick="refreshTable()">
+                <i class="fas fa-sync-alt"></i>
+                Refresh
+            </button>
+        </div>
+    </div>
+    
+    <table id="historyTable" class="table table-zebra w-full" style="width:100%">
+        <thead>
+            <tr>
+                <th>Timestamp</th>
+                <th>Group</th>
+                <th>Instance</th>
+                <th>Type</th>
+                <th>Status</th>
+                <th>Duration</th>
+                <th>Details</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% if history_logs.items %}
+                {% for log in history_logs.items %}
+                <tr>
+                    <td>{{ log.start_time.strftime('%Y-%m-%d %H:%M:%S') if log.start_time else 'N/A' }}</td>
+                    <td>
+                        {% if log.group %}
+                        <strong>{{ log.group.name }}</strong>
+                        {% else %}
+                        <span class="text-slate-400">Deleted Group</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <code class="text-xs">{{ log.instance_id_str }}</code>
+                    </td>
+                    <td>
+                        {% if log.ami_id_str %}
+                        <span class="badge badge-primary badge-sm">AMI</span>
+                        {% elif log.snapshots_created %}
+                        <span class="badge badge-info badge-sm">Snapshot</span>
+                        {% else %}
+                        <span class="badge badge-ghost badge-sm">Unknown</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if log.status == 'Success' %}
+                        <span class="badge badge-success badge-sm">{{ log.status }}</span>
+                        {% elif log.status == 'Failed' %}
+                        <span class="badge badge-error badge-sm">{{ log.status }}</span>
+                        {% else %}
+                        <span class="badge badge-warning badge-sm">{{ log.status }}</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if log.end_time and log.start_time %}
+                        {{ (log.end_time - log.start_time).total_seconds() | int }}s
+                        {% else %}
+                        -
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if log.ami_id_str %}
+                        <code class="text-xs">{{ log.ami_id_str }}</code>
+                        {% elif log.message %}
+                        <span class="text-xs text-error" title="{{ log.message }}">{{ log.message[:50] }}...</span>
+                        {% else %}
+                        -
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            {% else %}
+                <tr>
+                    <td colspan="7" class="text-center py-8 text-slate-400">
+                        <i class="fas fa-history text-4xl mb-2"></i>
+                        <p>No backup history yet</p>
+                        <p class="text-xs">Run a backup to see history</p>
+                    </td>
+                </tr>
+            {% endif %}
+        </tbody>
+    </table>
+    
+    <!-- Pagination -->
+    {% if history_logs.pages > 1 %}
+    <div class="flex justify-center mt-4">
+        <div class="join">
+            {% if history_logs.has_prev %}
+            <a href="?page={{ history_logs.prev_num }}" class="join-item btn btn-sm">«</a>
+            {% else %}
+            <button class="join-item btn btn-sm btn-disabled">«</button>
+            {% endif %}
+            
+            {% for page_num in history_logs.iter_pages() %}
+                {% if page_num %}
+                    {% if page_num != history_logs.page %}
+                    <a href="?page={{ page_num }}" class="join-item btn btn-sm">{{ page_num }}</a>
+                    {% else %}
+                    <button class="join-item btn btn-sm btn-active">{{ page_num }}</button>
+                    {% endif %}
+                {% else %}
+                    <button class="join-item btn btn-sm btn-disabled">...</button>
+                {% endif %}
+            {% endfor %}
+            
+            {% if history_logs.has_next %}
+            <a href="?page={{ history_logs.next_num }}" class="join-item btn btn-sm">»</a>
+            {% else %}
+            <button class="join-item btn btn-sm btn-disabled">»</button>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function applyFilters() {
+    // Get filter values
+    const dateRange = document.getElementById('filter_date').value;
+    const groupId = document.getElementById('filter_group').value;
+    const status = document.getElementById('filter_status').value;
+    
+    // Build URL with filters
+    let url = new URL(window.location.href);
+    url.searchParams.set('date_range', dateRange);
+    if (groupId) url.searchParams.set('group_id', groupId);
+    if (status) url.searchParams.set('status', status);
+    url.searchParams.delete('page'); // Reset to page 1
+    
+    window.location.href = url.toString();
+}
+
+function refreshTable() {
+    location.reload();
+}
+</script>
+{% endblock %}

@@ -1,0 +1,207 @@
+{% extends "base_sidebar.html" %}
+
+{% block title %}AWS Accounts - Settings{% endblock %}
+
+{% block content %}
+<div class="mb-6">
+    <h1 class="text-3xl font-bold text-white mb-2">AWS Accounts</h1>
+    <p class="text-slate-400">Manage your AWS account credentials</p>
+</div>
+
+<div class="card bg-base-100 shadow-xl">
+    <div class="card-body">
+        <button class="btn btn-primary" onclick="add_account_modal.showModal()">
+            <i class="fas fa-plus"></i> Add AWS Account
+        </button>
+        
+        <div class="overflow-x-auto mt-4">
+            <table class="table table-zebra">
+                <thead>
+                    <tr>
+                        <th>Account Name</th>
+                        <th>Region</th>
+                        <th>Last Sync</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% if aws_accounts %}
+                        {% for account in aws_accounts %}
+                        <tr>
+                            <td>{{ account.account_name }}</td>
+                            <td>{{ account.default_region or 'All Regions' }}</td>
+                            <td>
+                                {% if account.last_sync_status == 'Syncing in background...' %}
+                                    <span class="badge badge-info badge-sm">
+                                        <i class="fas fa-spinner fa-spin"></i> Syncing...
+                                    </span>
+                                {% elif 'Failed' in account.last_sync_status %}
+                                    <span class="badge badge-error badge-sm">{{ account.last_sync_status }}</span>
+                                {% elif 'Successful' in account.last_sync_status %}
+                                    <span class="badge badge-success badge-sm">{{ account.last_sync_status }}</span>
+                                {% else %}
+                                    <span class="badge badge-ghost badge-sm">{{ account.last_sync_status or 'Never Synced' }}</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <div class="flex gap-2">
+                                    <form method="POST" action="{{ url_for('dashboard.sync_account', account_id=account.id) }}" style="display: inline;">
+                                        <button type="submit" class="btn btn-xs btn-primary" {% if account.last_sync_status == 'Syncing in background...' %}disabled{% endif %}>
+                                            <i class="fas fa-sync"></i> Sync
+                                        </button>
+                                    </form>
+                                    <form method="POST" action="{{ url_for('dashboard.delete_account', account_id=account.id) }}" style="display: inline;" onsubmit="return confirm('Delete account {{ account.account_name }}? This will remove all synced data!');">
+                                        <button type="submit" class="btn btn-xs btn-error">
+                                            <i class="fas fa-trash"></i> Delete
+                                        </button>
+                                    </form>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    {% else %}
+                        <tr>
+                            <td colspan="4" class="text-center text-slate-400 py-8">
+                                <i class="fas fa-cloud text-4xl mb-2"></i>
+                                <p>No AWS accounts configured yet</p>
+                                <p class="text-xs">Click "Add AWS Account" to get started</p>
+                            </td>
+                        </tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Add Account Modal -->
+<dialog id="add_account_modal" class="modal">
+    <div class="modal-box w-11/12 max-w-2xl">
+        <h3 class="font-bold text-lg mb-4">Add AWS Account</h3>
+        
+        <form method="POST" action="{{ url_for('dashboard.add_account') }}" id="addAccountForm">
+            <!-- Account Name -->
+            <div class="form-control mb-4">
+                <label class="label">
+                    <span class="label-text">Account Name *</span>
+                </label>
+                <input type="text" name="account_name" placeholder="e.g., Production AWS" class="input input-bordered" required>
+            </div>
+            
+            <!-- Auth Type -->
+            <div class="form-control mb-4">
+                <label class="label">
+                    <span class="label-text">Authentication Type *</span>
+                </label>
+                <select name="auth_type" id="auth_type" class="select select-bordered" required onchange="toggleAuthFields()">
+                    <option value="">Select authentication type</option>
+                    <option value="access_key">Access Key</option>
+                    <option value="iam_role">IAM Role</option>
+                </select>
+            </div>
+            
+            <!-- Access Key Fields (shown when access_key is selected) -->
+            <div id="access_key_fields" style="display: none;">
+                <div class="form-control mb-4">
+                    <label class="label">
+                        <span class="label-text">AWS Access Key ID *</span>
+                    </label>
+                    <input type="text" name="aws_access_key_id" placeholder="AKIAIOSFODNN7EXAMPLE" class="input input-bordered">
+                </div>
+                
+                <div class="form-control mb-4">
+                    <label class="label">
+                        <span class="label-text">AWS Secret Access Key *</span>
+                    </label>
+                    <input type="password" name="aws_secret_access_key" placeholder="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" class="input input-bordered">
+                </div>
+            </div>
+            
+            <!-- IAM Role Fields (shown when iam_role is selected) -->
+            <div id="iam_role_fields" style="display: none;">
+                <div class="form-control mb-4">
+                    <label class="label">
+                        <span class="label-text">IAM Role ARN *</span>
+                    </label>
+                    <input type="text" name="role_arn" placeholder="arn:aws:iam::123456789012:role/MyRole" class="input input-bordered">
+                </div>
+            </div>
+            
+            <!-- Default Region -->
+            <div class="form-control mb-4">
+                <label class="label">
+                    <span class="label-text">Default Region (Optional)</span>
+                </label>
+                <select name="default_region" class="select select-bordered">
+                    <option value="">All Regions</option>
+                    <option value="us-east-1">US East (N. Virginia)</option>
+                    <option value="us-west-2">US West (Oregon)</option>
+                    <option value="eu-west-1">EU (Ireland)</option>
+                    <option value="ap-south-1">Asia Pacific (Mumbai)</option>
+                    <option value="ap-southeast-1">Asia Pacific (Singapore)</option>
+                </select>
+                <label class="label">
+                    <span class="label-text-alt">Leave blank to sync all regions</span>
+                </label>
+            </div>
+            
+            <!-- Action Buttons -->
+            <div class="modal-action">
+                <button type="button" class="btn" onclick="add_account_modal.close()">Cancel</button>
+                <button type="submit" class="btn btn-primary">
+                    <i class="fas fa-plus"></i> Add Account
+                </button>
+            </div>
+        </form>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button>close</button></form>
+</dialog>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function toggleAuthFields() {
+    const authType = document.getElementById('auth_type').value;
+    const accessKeyFields = document.getElementById('access_key_fields');
+    const iamRoleFields = document.getElementById('iam_role_fields');
+    
+    if (authType === 'access_key') {
+        accessKeyFields.style.display = 'block';
+        iamRoleFields.style.display = 'none';
+        
+        // Make access key fields required
+        document.querySelector('input[name="aws_access_key_id"]').required = true;
+        document.querySelector('input[name="aws_secret_access_key"]').required = true;
+        document.querySelector('input[name="role_arn"]').required = false;
+    } else if (authType === 'iam_role') {
+        accessKeyFields.style.display = 'none';
+        iamRoleFields.style.display = 'block';
+        
+        // Make IAM role fields required
+        document.querySelector('input[name="aws_access_key_id"]').required = false;
+        document.querySelector('input[name="aws_secret_access_key"]').required = false;
+        document.querySelector('input[name="role_arn"]').required = true;
+    } else {
+        accessKeyFields.style.display = 'none';
+        iamRoleFields.style.display = 'none';
+        
+        // Make all optional
+        document.querySelector('input[name="aws_access_key_id"]').required = false;
+        document.querySelector('input[name="aws_secret_access_key"]').required = false;
+        document.querySelector('input[name="role_arn"]').required = false;
+    }
+}
+
+// Auto-refresh page every 30 seconds to update sync status
+{% if aws_accounts %}
+    {% for account in aws_accounts %}
+        {% if account.last_sync_status == 'Syncing in background...' %}
+            setTimeout(function() {
+                location.reload();
+            }, 30000);
+        {% endif %}
+    {% endfor %}
+{% endif %}
+</script>
+{% endblock %}
